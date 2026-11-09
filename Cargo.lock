@@ -2242,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "mradm-adm"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "quick-xml",
 ]
@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "mradm-dsp"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "ebur128",
  "libm",
@@ -2264,7 +2264,7 @@ dependencies = [
 [[package]]
 name = "mradm-ear"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "nalgebra",
  "rustfft",
@@ -2273,7 +2273,7 @@ dependencies = [
 [[package]]
 name = "mradm-ffi"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "mradm-adm",
  "mradm-dsp",
@@ -2285,12 +2285,12 @@ dependencies = [
 [[package]]
 name = "mradm-math"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 
 [[package]]
 name = "mradm-osc"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "mradm-dsp",
  "serde_json",
@@ -2299,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "mradm-wav"
 version = "0.1.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 
 [[package]]
 name = "naga"
@@ -3316,7 +3316,7 @@ dependencies = [
 [[package]]
 name = "rubato"
 version = "5.0.1"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -3365,7 +3365,7 @@ dependencies = [
 [[package]]
 name = "rustfft"
 version = "6.4.1"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "num-complex",
  "num-integer",
@@ -3734,7 +3734,7 @@ dependencies = [
 [[package]]
 name = "sofar"
 version = "0.3.0"
-source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=d75d46028b85a84394ffaad32726e68c89549ae3#d75d46028b85a84394ffaad32726e68c89549ae3"
+source = "git+https://github.com/SakuzyPeng/MacinRender-ADM-Core.git?rev=f69bef50266e1e529e67f93f966d3e4c2501c56c#f69bef50266e1e529e67f93f966d3e4c2501c56c"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
