@@ -33,15 +33,15 @@ bytemuck = { version = "1", features = ["derive"] }
 apac-core = { git = "https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git", rev = "b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2" }
 apac-container = { git = "https://github.com/SakuzyPeng/MacinDecode-APAC-Core.git", rev = "b1ba6fa2fd82aaac7731f1a6cc74cc1ad24181b2" }
 image = { version = "0.25", default-features = false, features = ["png"] }
-macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f" }
+macindecode-ac4-inspect = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "69685c0cf5ddbd2bf38fa0568ae35f0bc4aa980f" }
 # Core decode. Not platform-gated: these crates carry no `target_os` of their
 # own and Core's release CI builds `audio-decode` for Linux, macOS and Windows
 # alike. What is Windows-only is *playback*, which lives in the native crate
 # below. The feature exists because the build needs the locally generated ETSI
 # spec tables (see README), not because a platform cannot decode.
-macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f", optional = true }
-macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f", features = ["std"] }
-macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "9673e1ef445e7e2ab218cc1b7b79f484fa92135f", features = ["audio-decode"], optional = true }
+macindecode-ac4-bitstream = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "69685c0cf5ddbd2bf38fa0568ae35f0bc4aa980f", optional = true }
+macindecode-ac4-mp4 = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "69685c0cf5ddbd2bf38fa0568ae35f0bc4aa980f", features = ["std"] }
+macindecode-ac4-scene = { git = "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", rev = "69685c0cf5ddbd2bf38fa0568ae35f0bc4aa980f", features = ["audio-decode"], optional = true }
 rfd = { version = "=0.17.2", default-features = false, features = [
     "common-controls-v6",
     "wayland",
