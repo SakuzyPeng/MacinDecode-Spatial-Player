@@ -193,6 +193,8 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 - **不做任何自动响度处理**：不应用响度调整、动态范围控制（DRC）、对白增强或额外降混。
 - 当前聚焦 **Full A-JOC** 内容，其他 AC-4 编码形式可能无法播放。
 - **APAC 的 HOA 暂不播放**，但可以查看信息。
+- **APAC 的 BWE2 暂不解码**：APAC Core v0.2.0 的默认构建不含 BWE2 数值恢复（所需的 LSF 数值表不随源码分发），
+  带活跃 BWE2 帧的文件解码时报 `bwe2-unavailable`。
 - **Triple Balance** 带 LFE 或输出 22.2 时要求 48 kHz 输入，并且不接受双 LFE 的 22.2 输入——那种文件请用 SAF VBAP。
 - **跳转有前提**：MP4/M4A 需要容器同步样本加上解码器报告的 Full random access；裸 `.ac4` 需要同步帧范围
   加上 Full random access。

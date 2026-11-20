@@ -240,6 +240,9 @@ current track — the app keeps using the file handle it already opened.
   enhancement or extra downmixing.
 - The current focus is **Full A-JOC**; other AC-4 coding flavors may not play.
 - **APAC HOA does not play yet**, though it can be inspected.
+- **APAC BWE2 is not decoded yet**: APAC Core v0.2.0's default build has no BWE2 numerical restoration
+  (the LSF tables it needs are not distributed with the source), so a file with active BWE2 frames fails
+  to decode with `bwe2-unavailable`.
 - **Triple Balance** needs 48 kHz input when an LFE is present or the output is 22.2, and does not
   accept dual-LFE 22.2 input — use SAF VBAP for those files.
 - **Seeking has prerequisites:** MP4/M4A needs a container sync sample *and* Full random access as
