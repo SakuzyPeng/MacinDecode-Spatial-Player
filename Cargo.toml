@@ -11,12 +11,17 @@ members = ["crates/windows-spatial-audio", "crates/macinrender"]
 default-members = [".", "crates/windows-spatial-audio"]
 resolver = "3"
 
-# Match ADM Core's patched DSP dependencies when its Rust kernels are linked
-# through Cargo. Keep these revisions aligned with the native CMake source pin.
+# ADM Core's own patched dependencies (its rust/Cargo.toml `[patch.crates-io]`).
+# Cargo applies patches only from the root workspace, so without these Core's
+# code would link the crates.io originals. Keep the revision aligned with
+# `mradm-capi` in crates/macinrender/Cargo.toml.
 [patch.crates-io]
-sofar = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "f69bef50266e1e529e67f93f966d3e4c2501c56c" }
-rubato = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "f69bef50266e1e529e67f93f966d3e4c2501c56c" }
-rustfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "f69bef50266e1e529e67f93f966d3e4c2501c56c" }
+sofar = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+rubato = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+rustfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+realfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+ebur128 = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+rayon-core = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
 
 [dependencies]
 eframe = { version = "=0.36.1", default-features = false, features = [

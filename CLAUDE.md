@@ -89,16 +89,17 @@ features, not on the platform:
 | Feature | Input | Env |
 | --- | --- | --- |
 | `decode` | three ETSI TS 103 190 tables generated from the official spec | `MACINDECODE_AC4_SPEC_DIR` |
-| `macinrender` | MacinRender sources built through CMake/Ninja with a C++20 toolchain and Rust 1.98 (macOS/Windows only) | `MACINRENDER_SOURCE_DIR`, `MACINRENDER_FETCHCONTENT_DIR`, `CMAKE_TOOLCHAIN_FILE` |
+| `macinrender` | MacinRender's `mradm-capi` Cargo dependency, whose `mradm-islands-sys` builds the C/C++ islands and codecs through CMake with a C++20 toolchain (macOS/Windows only); packaging also needs a checkout of the same commit for its license texts | `MACINRENDER_SOURCE_DIR` (packaging), `MRADM_NATIVE_CMAKE_ARGS` |
 
 The demo score is neither: `scripts/generate-demo-score.py` fetches checksum-pinned `LilyPond`
 sources, transcribes them, and the result is committed, so no build or test reaches the network for
 it.
 
 `python scripts/prepare_inputs.py` produces all of it under the gitignored `.ci-inputs/`: it checks
-out Core at the `rev` pinned in `Cargo.toml` and MacinRender at the `GIT_TAG` pinned in
-`crates/macinrender/native/CMakeLists.txt`, runs Core's `fetch_specs.py` / `generate_spec_tables.py`,
-and uses Core’s Rust numerical kernels without the legacy OpenBLAS/Boost SDKs. It only exports into the calling process and
+out Core at the `rev` pinned in `Cargo.toml` and MacinRender at the `mradm-capi` `rev` pinned in
+`crates/macinrender/Cargo.toml`, and runs Core's `fetch_specs.py` / `generate_spec_tables.py`.
+Cargo fetches and builds MacinRender itself; `.cargo/config.toml`'s `[env]` keeps the islands on
+their vendored FLAC/Opus and off installed packages. It only exports into the calling process and
 `GITHUB_ENV`, so for an interactive build either point the variables at `.ci-inputs/` yourself or run
 `scripts/package.py`, which prepares and builds in one process.
 
@@ -472,18 +473,20 @@ side of the trade.
 - The four `MacinDecode-AC4-Core` crates are pinned to one git `rev`; bump all of them together and
   regenerate the spec tables from a matching Core checkout. `apac-core` / `apac-container` share
   their own `rev`.
-- MacinRender-ADM-Core is pinned in **three** places that must name the same commit:
-  `crates/macinrender/native/CMakeLists.txt` (`GIT_TAG`), `crates/macinrender/Cargo.toml`
-  (`mradm-ffi`, the Rust kernels linked through Cargo so ThinLTO sees one std), and the root
-  `[patch.crates-io]` (`sofar` / `rubato` / `rustfft`, Core's patched DSP crates). `docs/MACINRENDER.md`
-  records the pinned commit and C ABI version.
+- MacinRender-ADM-Core is pinned in **two** places that must name the same commit:
+  `crates/macinrender/Cargo.toml` (`mradm-capi`, the Rust crate implementing the C ABI, linked as an
+  rlib so ThinLTO sees one std, and `mradm-islands-sys`, named only for its link manifest) and the
+  root `[patch.crates-io]`, which repeats all six of Core's own patches (`sofar` / `rubato` /
+  `rustfft` / `realfft` / `ebur128` / `rayon-core`) because Cargo applies patches only from the root
+  workspace. `docs/MACINRENDER.md` records the pinned commit and C ABI version.
 - Core gates its rendering as bit-identical across macOS arm64 / Linux x64 / Windows x64; the
   user-facing docs deliberately don't claim it for the player yet. It holds in the player only
   while the linked graph keeps Core's conditions:
-  `rustfft` / `realfft` / `rubato` with no features (Cargo feature unification would bring back
-  run-time SIMD/FMA dispatch), Core's patched copies, `nalgebra` with `libm-force`, and no
-  `target-cpu` / `+fma` rustflags. `scripts/test_render_determinism.py` checks all of it and the
-  three-place pin; a new dependency that trips it needs a different dependency, not a looser test.
+  `rustfft` with exactly Core's `avx,mradm-scalar-default,neon,sse` (the SIMD kernels compile, but
+  `mradm-scalar-default` keeps every default planner scalar), `realfft` / `rubato` with no features,
+  all six of Core's patched copies, `nalgebra` with `libm-force`, and no `target-cpu` / `+fma`
+  rustflags. `scripts/test_render_determinism.py` checks all of it and the pins; a new dependency
+  that trips it needs a different dependency, not a looser test.
 - `.cargo/config.toml` sets `+crt-static` and `/STACK:8000000` on both MSVC targets and pins
   `MACOSX_DEPLOYMENT_TARGET=14.0`; the decoder depends on the stack size and packaging on the rest.
 - UI strings are English. `docs/` is Chinese; `README.md` is Chinese with `README.en.md` alongside it.

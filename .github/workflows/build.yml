@@ -62,16 +62,16 @@ jobs:
         id: rust_cache
         with:
           workspaces: . -> ${{ env.CARGO_TARGET_DIR || 'target' }}
-          # Cargo/native outputs and the Core Rust kernels follow the renderer
-          # revision. The license tool has an independent cache below.
-          key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/native/CMakeLists.txt') }}
-          # Native Release outputs are shared across Cargo profiles in v2.
-          prefix-key: v2-shared-native
+          # ADM Core, its islands and codecs are Cargo dependencies built in
+          # the target directory; they follow the renderer revision. The
+          # license tool has an independent cache below.
+          key: ${{ matrix.target }}-static-v1-xcode26.3-${{ hashFiles('crates/macinrender/Cargo.toml') }}
+          # v3: the islands are built per Cargo profile by mradm-islands-sys.
+          prefix-key: v3-cargo-native
           cache-workspace-crates: true
           cache-on-failure: false
           cache-directories: |
             .ci-tools
-            .ci-inputs/native-dependencies
             .ci-inputs/macinrender
             .ci-inputs/ac4-core
       - name: Configure build reuse and parallelism
@@ -83,9 +83,8 @@ jobs:
           jobs = min(4, os.cpu_count() or 2)
           settings = {
               "CARGO_BUILD_JOBS": jobs,
-              "MACINRENDER_BUILD_JOBS": min(2, jobs),
-              # Keep CMake outputs outside Cargo's target cache cleanup.
-              "MACINRENDER_BUILD_DIR": root / ".ci-inputs/macinrender/build/player-native",
+              # The islands' CMake build runs inside a Cargo job.
+              "CMAKE_BUILD_PARALLEL_LEVEL": min(2, jobs),
               "MACINDECODE_UI_FONT_CACHE_DIR": root / ".ci-tools/fonts",
           }
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:

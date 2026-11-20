@@ -6,3 +6,9 @@ rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8000000"
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"
+# ADM Core's islands (`mradm-islands-sys`) link their codecs statically from the
+# sources they fetch, never from Homebrew, vcpkg or a system package. An
+# environment variable of the same name still takes precedence.
+MR_ADM_FLAC_PROVIDER = "VENDORED"
+MR_ADM_OPUS_PROVIDER = "VENDORED"
+MRADM_NATIVE_CMAKE_ARGS = "MR_ADM_CORE_USE_INSTALLED_DEPS=OFF"

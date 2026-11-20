@@ -1,11 +1,14 @@
 """Keep the conditions MacinRender's cross-platform bit equality rests on.
 
 ADM Core gates its PCM as bit-identical on macOS arm64, Linux x64 and Windows
-x64, and the player links that Rust code through Cargo. Cargo unifies features
-across the whole graph, so one unrelated dependency asking for rustfft's
-default features would quietly restore the run-time SIMD/FMA dispatch Core
-removed (ADR 0015). Check the graph the installers are built from, and that
-the three places pinning Core name one commit.
+x64, and the player links that Rust code through Cargo. Cargo applies patches
+only from the root workspace and unifies features across the whole graph, so
+the player has to repeat Core's own `[patch.crates-io]`, and one unrelated
+dependency could change what Core's code links. RustFFT compiles its SIMD
+kernels, but Core's `mradm-scalar-default` keeps every default planner scalar;
+only the realtime room quality asks for the native one (ADR 0015, 0020).
+Check the graph the installers are built from, and that every pin names one
+commit.
 """
 
 import os
@@ -13,17 +16,21 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin")
-SCALAR_ONLY = ("rustfft", "realfft", "rubato")
+# Core's patched copies, by name: its rust/Cargo.toml `[patch.crates-io]`.
+PATCHED = ("sofar", "rubato", "rustfft", "realfft", "ebur128", "rayon-core")
+# Features each patched DSP crate must resolve to, exactly as Core builds it.
+FEATURES = {"rustfft": "avx,mradm-scalar-default,neon,sse", "realfft": "", "rubato": ""}
 CORE = "MacinRender-ADM-Core.git?rev="
 
 
 def core_pin():
-    text = (ROOT / "crates/macinrender/native/CMakeLists.txt").read_text(encoding="utf-8")
-    return re.search(r"GIT_TAG\s+([0-9a-f]{40})", text).group(1)
+    text = (ROOT / "crates/macinrender/Cargo.toml").read_text(encoding="utf-8")
+    return re.search(r'mradm-capi = \{ git = "[^"]+", rev = "([0-9a-f]{40})"', text).group(1)
 
 
 def resolved(target):
@@ -53,18 +60,35 @@ class RenderDeterminismTests(unittest.TestCase):
         for target in targets:
             self.assertIn(target, TARGETS, "Expected a packaged desktop target")
             packages = resolved(target)
-            for name in SCALAR_ONLY:
+            for name in PATCHED:
                 with self.subTest(target=target, package=name):
                     self.assertIn(name, packages)
                     for source, features in packages[name]:
-                        self.assertEqual(features, "", f"{name} must not enable SIMD features")
-                        if name != "realfft":
-                            self.assertIn(CORE + pin, source, f"{name} must be Core's patched copy")
+                        self.assertIn(CORE + pin, source, f"{name} must be Core's patched copy")
+                        if name in FEATURES:
+                            self.assertEqual(features, FEATURES[name], f"{name} features differ from Core's")
             with self.subTest(target=target, package="nalgebra"):
                 self.assertTrue(all("libm-force" in features.split(",")
                                     for _, features in packages["nalgebra"]))
-            with self.subTest(target=target, package="mradm-ffi"):
-                self.assertTrue(all(CORE + pin in source for source, _ in packages["mradm-ffi"]))
+            for name in ("mradm-capi", "mradm-islands-sys"):
+                with self.subTest(target=target, package=name):
+                    self.assertIn(name, packages)
+                    self.assertTrue(all(CORE + pin in source for source, _ in packages[name]))
+
+    def test_the_workspace_repeats_every_patch_core_applies(self):
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        patches = manifest["patch"]["crates-io"]
+        self.assertEqual(sorted(patches), sorted(PATCHED))
+        for name, patch in patches.items():
+            with self.subTest(package=name):
+                self.assertEqual(patch.get("rev"), core_pin(), f"{name} patch is not the linked Core")
+        # Packaging's checkout of the same commit: a patch Core adds later
+        # has to be added here too, or Core's code links the crates.io original.
+        source = os.environ.get("MACINRENDER_SOURCE_DIR")
+        if not source:
+            self.skipTest("MACINRENDER_SOURCE_DIR is not prepared")
+        core = tomllib.loads((Path(source) / "rust/Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(core["patch"]["crates-io"]), sorted(PATCHED))
 
     def test_release_flags_do_not_target_the_build_machine(self):
         # target-cpu=native or +fma would let LLVM contract and vectorise by host.

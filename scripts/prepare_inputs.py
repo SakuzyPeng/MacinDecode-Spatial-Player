@@ -56,17 +56,23 @@ def prepare_spec_tables(core, revision):
     stamp.write_text(json.dumps(spec_identity(core, revision)), encoding="utf-8")
 
 
+def native_pin():
+    """The ADM Core commit `crates/macinrender` links, which the workspace patches repeat."""
+    manifest = (ROOT / "crates/macinrender/Cargo.toml").read_text(encoding="utf-8")
+    return re.search(r'mradm-capi = \{ git = "[^"]+", rev = "([0-9a-f]{40})"', manifest)[1]
+
+
 def prepare():
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     INPUTS.mkdir(exist_ok=True)
     settings = {}
-    cmake = (ROOT / "crates/macinrender/native/CMakeLists.txt").read_text()
-    native_revision = re.search(r"GIT_TAG ([0-9a-f]{40})", cmake)[1]
+    # Cargo fetches and builds ADM Core itself (`mradm-capi`); this checkout of
+    # the same commit supplies the license texts packaging distributes.
+    native_revision = native_pin()
     native = Path(os.environ["MACINRENDER_SOURCE_DIR"]) if os.getenv("MACINRENDER_SOURCE_DIR") else checkout(
         "macinrender", "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", native_revision)
     settings["MACINRENDER_SOURCE_DIR"] = str(native.resolve())
-    settings["MACINRENDER_FETCHCONTENT_DIR"] = os.environ.get("MACINRENDER_FETCHCONTENT_DIR", str(INPUTS / "native-dependencies"))
     if not os.getenv("MACINDECODE_AC4_SPEC_DIR"):
         revision = re.search(r'MacinDecode-AC4-Core\.git", rev = "([0-9a-f]{40})"', (ROOT / "Cargo.toml").read_text())[1]
         core = checkout("ac4-core", "https://github.com/SakuzyPeng/MacinDecode-AC4-Core.git", revision)

@@ -32,19 +32,19 @@ python scripts/package.py --target x86_64-pc-windows-msvc
 python3 scripts/package.py --target aarch64-apple-darwin
 ```
 
-脚本为完整默认 feature 准备构建输入：从锁定的 Core 提交取得并生成 ETSI 规范表，从锁定的 MacinRender 提交构建原生库和 Rust 数值内核。使用仓库固定的 Rust 1.98；生产构建不再需要 OpenBLAS、LAPACKE、Boost 或仅为旧 SDK 下载的 LLVM。规范表与源码位于被忽略的 `.ci-inputs/`，不作为发布资产。
+脚本为完整默认 feature 准备构建输入：从锁定的 Core 提交取得并生成 ETSI 规范表，由 Cargo 从锁定的 MacinRender 提交构建 C ABI（`mradm-capi`）及其 C/C++ 岛，并检出同一提交供取许可证原文。使用仓库固定的 Rust 1.98；生产构建不再需要 OpenBLAS、LAPACKE、Boost 或仅为旧 SDK 下载的 LLVM。规范表与源码位于被忽略的 `.ci-inputs/`，不作为发布资产。
 
-已有合法输入可通过 `MACINDECODE_AC4_SPEC_DIR`、`MACINRENDER_SOURCE_DIR` 指定。CI 使用锁定输入；本地覆盖只适合开发，构建清单会记录实际原生提交。
+已有合法输入可通过 `MACINDECODE_AC4_SPEC_DIR`、`MACINRENDER_SOURCE_DIR` 指定。CI 使用锁定输入；本地覆盖只适合开发，构建清单会记录实际原生提交；它必须与 `MACINRENDER_SOURCE_DIR` 的提交相同，否则打包失败。
 
 许可报告包括 Rust 依赖、播放器 MIT 许可、Noto CJK 字体及 MacinRender 原生第三方许可，并内嵌于 About 页面。图标沿用 `assets/icons/`，不另建一套品牌资源。
 
-打包工具与稳定许可输入放在 `.ci-tools/`，避免 Cargo 缓存清理破坏 .NET 工具结构。Core 的 Rust 数值内核使用其共享 `build/rust`；原生许可 bundle 同时覆盖其 Rust 依赖。打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、VBAP／内置双耳渲染的实际 Scene 提交、播放进度及图形窗口。运行时只允许系统组件及显卡驱动。分别采集原生渲染与窗口初始化的加载证据，拒绝应用旁边、构建目录或 Homebrew 中的动态库。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
+打包工具与稳定许可输入放在 `.ci-tools/`，避免 Cargo 缓存清理破坏 .NET 工具结构。Core 的 Rust crate 与播放器同一个 Cargo 依赖图，其许可由 cargo-about 一并列出；原生许可 bundle 覆盖岛的 C/C++ 第三方库。打包后解包核对文件和哈希，再搬移完整程序载荷运行 SQLite/设置检查、VBAP／内置双耳渲染的实际 Scene 提交、播放进度及图形窗口。运行时只允许系统组件及显卡驱动。分别采集原生渲染与窗口初始化的加载证据，拒绝应用旁边、构建目录或 Homebrew 中的动态库。检查通过才输出 `dist/` 的安装包、校验和和构建清单。失败日志保存在 `target/packaging-failures/`。
 
 ## CI 与发布
 
-Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结果；`v2-shared-native` 前缀用于共享原生构建目录的新布局。首次运行需重新填充，后续主线、PR 和发布构建可以复用 GitHub 允许其访问的缓存，成功的 PR 运行也会保存本 PR 的缓存。
+Cargo 缓存仅在任务成功完成后保存，确保包含 Release 构建结果；`v3-cargo-native` 前缀对应岛由 `mradm-islands-sys` 在 Cargo 构建目录内编译的布局。首次运行需重新填充，后续主线、PR 和发布构建可以复用 GitHub 允许其访问的缓存，成功的 PR 运行也会保存本 PR 的缓存。
 
-测试、Clippy 和 Release 复用 `.ci-inputs/macinrender/build/player-native` 下的同一份原生 Release 产物，按源码路径、目标平台和工具链配置区分目录并加文件锁。目录放在 Cargo target 外，避免 rust-cache 的清理误删 CMake 产物。Cargo 并行数按运行器 CPU 数量设置，上限为 4；嵌套 CMake／Rust 编译上限为 2，避免两层并发耗尽内存。Windows 精确命中 Rust 缓存时，发布阶段使用 2 路并行：依赖已编译，此时主要剩下播放器的 ThinLTO，实测 4 路反而更慢。冷构建仍使用最多 4 路并行编译依赖。并行度在缓存恢复后设置，不参与构建缓存身份。
+岛的 CMake 产物位于 Cargo 构建目录，测试、Clippy 与 Release 各编译一次，随 rust-cache 一起缓存。Cargo 并行数按运行器 CPU 数量设置，上限为 4；岛内 CMake 编译（`CMAKE_BUILD_PARALLEL_LEVEL`）上限为 2，避免两层并发耗尽内存。Windows 精确命中 Rust 缓存时，发布阶段使用 2 路并行：依赖已编译，此时主要剩下播放器的 ThinLTO，实测 4 路反而更慢。冷构建仍使用最多 4 路并行编译依赖。并行度在缓存恢复后设置，不参与构建缓存身份。
 
 AC-4 规范表随固定 Core 提交缓存，复用前核对提交号和三个表文件的 SHA-256；缺失、变化或生成失败都会失效。缓存命中时保留文件时间，避免相同表数据触发解码器重编译。Core 的构建脚本仍校验锁定的表摘要。UI 字体保存在 `.ci-tools/fonts`，各 Cargo profile 复制校验通过的字体，并发下载由文件锁协调。
 
@@ -64,7 +64,7 @@ Windows 打包回归还使用独立产品 GUID、注册表键和临时安装目�
 
 ## 静态链接边界
 
-播放器直接使用固定版本的 C ABI，FFI 仍封装在独立 crate，主程序禁止 unsafe。CMake File API 提供有序的传递链接输入；构建脚本拒绝 DLL 导入库和第三方动态库，最终安装包再检查 PE 普通／延迟导入或 Mach-O 架构、依赖及签名。头追探针仅创建和销毁控制对象，不调用采样，也不请求运动权限。
+播放器直接使用固定版本的 C ABI，FFI 仍封装在独立 crate，主程序禁止 unsafe。`mradm-islands-sys` 的链接清单提供有序的传递链接输入；构建脚本审计清单，拒绝 DLL 导入库和第三方动态库，最终安装包再检查 PE 普通／延迟导入或 Mach-O 架构、依赖及签名。头追探针仅创建和销毁控制对象，不调用采样，也不请求运动权限。
 
 `python scripts/package-player.py` 保留独立程序载荷的打包入口，自动嵌入许可并执行相同的依赖和运行检查，构建清单放在载荷外侧。正式安装包仍使用 `scripts/package.py`，生成 MSI／PKG、SHA-256 和含静态构建信息的清单。
 

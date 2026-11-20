@@ -261,8 +261,8 @@ current track — the app keeps using the file handle it already opened.
 
 - **Rust 1.98** — pinned in `rust-toolchain.toml`, so rustup installs it for you.
 - **Python 3.11+** — to prepare build inputs (the Windows MSI inspection needs 3.12).
-- **CMake, Ninja and a C++20 toolchain** — macOS/Windows only, to build the MacinRender native
-  renderer. Not needed on Linux.
+- **CMake and a C++20 toolchain** — macOS/Windows only: Cargo runs CMake to build MacinRender's
+  C/C++ parts. Not needed on Linux.
 - **Network access** — the build script downloads a checksum-pinned Noto Sans CJK font so CJK file
   names render. Point `MACINDECODE_UI_FONT_PATH` at a local font file to skip the download.
 
@@ -284,26 +284,25 @@ neither commits nor distributes them.
 python scripts/prepare_inputs.py
 ```
 
-This checks out [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) and
-[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) at the commits pinned in
-`Cargo.toml` and `crates/macinrender/native/CMakeLists.txt` and generates the spec tables under the
-gitignored `.ci-inputs/`. MacinRender's numerical kernels are Rust, compiled and linked by Cargo along
-with the player, so OpenBLAS and Boost are no longer needed. The APAC decoder,
+This checks out [MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) at the
+commit pinned in `Cargo.toml` and generates the spec tables, and checks out
+[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) at the commit pinned in
+`crates/macinrender/Cargo.toml` for the license texts the installers carry, all under the gitignored
+`.ci-inputs/`. MacinRender's C ABI is implemented in Rust and, like the APAC decoder
 [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core), is an ordinary Cargo
-dependency and needs no extra input. Then point your shell at the inputs:
+dependency compiled and linked along with the player, so OpenBLAS and Boost are no longer needed.
+Then point your shell at the spec tables:
 
 ```bash
 export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
-export MACINRENDER_SOURCE_DIR="$PWD/.ci-inputs/macinrender"
 ```
 
 ```bat
 set "MACINDECODE_AC4_SPEC_DIR=%CD%\.ci-inputs\ac4-core\spec"
-set "MACINRENDER_SOURCE_DIR=%CD%\.ci-inputs\macinrender"
 ```
 
 `MACINDECODE_AC4_SPEC_DIR` must contain `generated/ts103190_pdf_tables.rs`, `ts_103190_tables.c` and
-`ts_103190_tables_part2.c`. A full build uses CMake/Ninja, a C++20 compiler and Rust 1.98.
+`ts_103190_tables_part2.c`. A full build uses CMake, a C++20 compiler and Rust 1.98.
 The packaging script below prepares the inputs and builds in the same process.
 
 ### Everyday commands
@@ -357,7 +356,7 @@ The design docs, which describe how the code is organised, are written in Chines
 ## Decoding and rendering components
 
 The player holds no decoding or rendering algorithms of its own. They come from four separate
-repositories, each pinned in `Cargo.toml` and `crates/macinrender/native/CMakeLists.txt`:
+repositories, each pinned in `Cargo.toml` and `crates/macinrender/Cargo.toml`:
 
 | Component | What it does |
 | --- | --- |

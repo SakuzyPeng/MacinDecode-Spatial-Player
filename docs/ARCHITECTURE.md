@@ -17,8 +17,8 @@ Decode adapter ────────────── Spatial output backend
 ```
 
 GUI、播放协调器和解码适配器均留在 Rust 进程内，直接依赖 `macindecode-ac4-mp4`、`macindecode-ac4-scene`
-与 `apac-container` / `apac-core`，不跨语言暴露 Rust 类型或 Rust ABI。MacinRender 的 Rust 数值内核
-（`mradm-ffi`）也由 Cargo 链进同一个依赖图，但播放器只经它的 C ABI 调用。
+与 `apac-container` / `apac-core`，不跨语言暴露 Rust 类型或 Rust ABI。MacinRender 的 C ABI 由 Rust
+crate `mradm-capi` 实现，也由 Cargo 链进同一个依赖图，但播放器只经它的 C ABI 调用。
 
 平台后端只能消费播放器内部定义的窄语义：对象稳定 ID、单声道 normalized `f32` PCM、最多两路独立 LFE、
 整数采样时间、active、位置、增益和 ramp。后端不得接收 `Ac4SceneFrame`，也不得反向影响解码器

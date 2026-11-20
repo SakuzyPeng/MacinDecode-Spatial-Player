@@ -209,7 +209,7 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 
 - **Rust 1.98**——`rust-toolchain.toml` 已锁定版本，rustup 会自动安装。
 - **Python 3.11+**——用于准备构建输入（Windows 上的 MSI 检查需要 3.12）。
-- **CMake、Ninja 和 C++20 工具链**——仅 macOS/Windows 需要，用于编译 MacinRender 原生渲染库；Linux 不需要。
+- **CMake 和 C++20 工具链**——仅 macOS/Windows 需要：Cargo 会调用 CMake 编译 MacinRender 的 C/C++ 部分；Linux 不需要。
 - **网络**——构建脚本会下载校验过的 Noto Sans CJK 字体用于显示中日韩文件名；可用
   `MACINDECODE_UI_FONT_PATH` 指定本地字体文件跳过下载。
 
@@ -230,26 +230,25 @@ Bass / Tilt 与逐段核对、逐对象头追与听者朝向，都在
 python scripts/prepare_inputs.py
 ```
 
-它按 `Cargo.toml` 和 `crates/macinrender/native/CMakeLists.txt` 里锁定的提交检出
-[MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 与
-[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core)，生成规范表，输入放进被忽略的
-`.ci-inputs/`。MacinRender 的数值内核是 Rust，随主程序由 Cargo 一起编译和链接，不再需要 OpenBLAS 或 Boost。
-APAC 解码器 [MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) 是普通的 Cargo 依赖，
-不需要额外的输入。
-然后在你的 shell 里指向它们：
+它按 `Cargo.toml` 里锁定的提交检出
+[MacinDecode-AC4-Core](https://github.com/SakuzyPeng/MacinDecode-AC4-Core) 并生成规范表，另按
+`crates/macinrender/Cargo.toml` 检出同一提交的
+[MacinRender-ADM-Core](https://github.com/SakuzyPeng/MacinRender-ADM-Core) 供安装包取许可证原文，都放进被忽略的
+`.ci-inputs/`。MacinRender 的 C ABI 由 Rust 实现，和 APAC 解码器
+[MacinDecode-APAC-Core](https://github.com/SakuzyPeng/MacinDecode-APAC-Core) 一样是普通的 Cargo 依赖，
+随主程序一起编译和链接，不再需要 OpenBLAS 或 Boost。
+然后在你的 shell 里指向规范表：
 
 ```bash
 export MACINDECODE_AC4_SPEC_DIR="$PWD/.ci-inputs/ac4-core/spec"
-export MACINRENDER_SOURCE_DIR="$PWD/.ci-inputs/macinrender"
 ```
 
 ```bat
 set "MACINDECODE_AC4_SPEC_DIR=%CD%\.ci-inputs\ac4-core\spec"
-set "MACINRENDER_SOURCE_DIR=%CD%\.ci-inputs\macinrender"
 ```
 
 `MACINDECODE_AC4_SPEC_DIR` 指向的目录里必须有 `generated/ts103190_pdf_tables.rs`、
-`ts_103190_tables.c` 和 `ts_103190_tables_part2.c`。完整构建使用 CMake/Ninja、C++20 编译器与 Rust 1.98。
+`ts_103190_tables.c` 和 `ts_103190_tables_part2.c`。完整构建使用 CMake、C++20 编译器与 Rust 1.98。
 下面的打包脚本会在同一个进程里准备输入再构建。
 
 ### 日常命令
@@ -301,7 +300,7 @@ python3 scripts/package.py --target aarch64-apple-darwin
 ## 解码与渲染组件
 
 播放器本身不含解码或渲染算法，它们来自四个独立仓库，版本都锁定在 `Cargo.toml` 和
-`crates/macinrender/native/CMakeLists.txt` 里：
+`crates/macinrender/Cargo.toml` 里：
 
 | 组件 | 负责 |
 | --- | --- |

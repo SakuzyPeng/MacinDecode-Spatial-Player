@@ -308,6 +308,10 @@ def build(target, tag):
         legacy_spec.loader.exec_module(legacy)
         native = legacy.cargo_native(Path(metadata["target_directory"]) / target)
         require(native.get("linkage") == "static", "Packaging requires static native linkage")
+        native_commit = output(["git", "-C", native["source"], "rev-parse", "HEAD"])
+        # The notices come from the prepared checkout; Cargo links its own.
+        require(native_commit == output(["git", "-C", os.environ["MACINRENDER_SOURCE_DIR"], "rev-parse", "HEAD"]),
+                "Native license notices come from a different MacinRender commit")
         extension = ".msi" if os.name == "nt" else ".pkg"
         artifact_stem = f"MacinDecode-Spatial-Player-{artifact_version}-{target}"
         installer = work / (artifact_stem + extension)
@@ -344,9 +348,9 @@ def build(target, tag):
                     "cargo_lock_sha256": sha256(ROOT / "Cargo.lock"), "rustc": output(["rustc", "--version"]),
                     "signing": "unsigned-msi" if os.name == "nt" else "ad-hoc-app/unsigned-pkg",
                     "minimum_os": "Windows 10 22H2" if os.name == "nt" else "macOS " + MAC_MINIMUM,
-                    "native_commit":output(["git", "-C", native["source"], "rev-parse", "HEAD"]),
+                    "native_commit": native_commit,
                     "native_linkage": "static",
-                    "native_numerics": "mradm-ffi (Rust)",
+                    "native_numerics": "mradm-capi (Rust)",
                     "dependencies": dependencies, "smoke_test": runtime}
         shutil.copy2(installer, dist / installer.name)
         (dist / (installer.name + ".sha256")).write_text(f"{manifest['installer_sha256']}  {installer.name}\n", encoding="utf-8")

@@ -1,6 +1,6 @@
 # MacinRender 播放集成
 
-Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-native Scene，经 MacinRender C ABI v1.45
+Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-native Scene，经 MacinRender C ABI v1.50
 进行空间渲染及设备输出。Core 类型和平台指针均不进入 GUI；FFI 封装集中在独立 crate。
 
 ## 扬声器渲染后端
@@ -8,7 +8,7 @@ Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-nativ
 `Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
 VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
 
-当前固定 Core `d75d460` / C ABI 1.45（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+当前固定 Core `c754495` / C ABI 1.50（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
 
 Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
 
@@ -125,11 +125,15 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR、比例或屏幕需要新会话；只换房间不重建，留给
 `adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
 
-当前固定的 `d75d460` / C ABI 1.45 没有房间渲染。`OutputSettings::playback_blocker` 在选中 Room 时
-总是返回错误（未选房间包时提示先选），`validate_source`、`PreparedSession::new` 和
-`Runtime::replace_source` 在创建或复用会话前检查它：Room 选择既不会新建会话，也不会复用已持有的
-SAF 会话、在 Room 名义下播放 SAF HRTF。接入后端时升级三处固定版本，在 `native::RendererSettings`
-中携带房间配置，并删除 `ROOM_PLAYBACK_UNAVAILABLE` 这一分支。
+固定的 `c754495` / C ABI 1.50 已带房间渲染（1.46 房间、1.47 屏幕、1.48 质量档），播放器还没有接上。
+`OutputSettings::playback_blocker` 在选中 Room 时总是返回错误（未选房间包时提示先选），
+`validate_source`、`PreparedSession::new` 和 `Runtime::replace_source` 在创建或复用会话前检查它：
+Room 选择既不会新建会话，也不会复用已持有的 SAF 会话、在 Room 名义下播放 SAF HRTF。接入时在
+`native::RendererSettings` 中携带房间配置，并删除 `ROOM_PLAYBACK_UNAVAILABLE` 这一分支。
+
+接入时要对齐的上游变化：`adm_room_config_t.metres_per_unit` 为 0 表示自动映射，且是上游默认；
+播放器的比例设置目前只有固定值（默认 1.5），要先决定是否提供“自动”。房间视图按
+`adm_scene_stream_room_source_json` 读实际受限后的坐标即可，不必在播放器里重算放置。
 
 ## 耳机补偿（HpTF）
 
@@ -417,56 +421,62 @@ FFT 工作区、卷积尾部及对象状态仍由每个渲染器独立持有。
 
 ## 原生源码构建
 
-默认 feature 包含 `decode` 和 `macinrender`。Cargo 调用 CMake/Ninja 构建固定提交的源代码；
-原生库使用 Release，开启 SOFA，关闭 CLI、测试和 IAMF。数值内核是 Core 的 Rust crate `mradm-ffi`，
-作为 `crates/macinrender` 的普通 Cargo 依赖链入，与播放器共用一个 Rust 依赖图和标准库，ThinLTO 下不会出现
-两份 std；CMake 为探针生成的独立 `mradm_ffi` staticlib 在链接时被跳过。Windows 使用 MSVC，不再准备
-OpenBLAS/LAPACKE 或 Boost。
+默认 feature 包含 `decode` 和 `macinrender`。ADM Core 自 6.6 起以 Cargo 为构建入口：C ABI 由 Rust crate
+`mradm-capi` 实现，C/C++ 岛与 libFLAC／libopus 由它依赖的 `mradm-islands-sys` 在构建脚本里经 `cmake`
+crate 构建（始终 Release，开启 SOFA，不带 IAMF）。`crates/macinrender` 把 `mradm-capi` 作为普通 Cargo
+依赖链入其 rlib，与播放器共用一个 Rust 依赖图和标准库，ThinLTO 下不会出现两份 std；播放器自己不再有
+CMake 工程。`.cargo/config.toml` 的 `[env]` 让岛使用自带源码的编解码库
+（`MR_ADM_FLAC_PROVIDER`／`MR_ADM_OPUS_PROVIDER=VENDORED`、`MR_ADM_CORE_USE_INSTALLED_DEPS=OFF`），
+不取 Homebrew、vcpkg 或系统包；同名环境变量优先。
+
+`crates/macinrender/build.rs` 只编译播放器自己的 C／Objective-C：
+
+- `abi_probe.c`：按上游 `c_api.h` 报告结构体大小与字段偏移，`rust_layouts_match_the_actual_c_header`
+  与 `raw.rs` 逐项比对；
+- macOS 上的 `gui/native/mr_headmotion.m`（AirPods 运动）和 Atmos 标签辅助。
+
+上游源码目录取自 `mradm-islands-sys` 交给依赖方的链接清单（`DEP_MRADM_ISLANDS_MANIFEST`）旁边的
+`CMakeCache.txt`，即 Cargo 检出的同一份代码。构建脚本先审计清单：岛与编解码库必须是静态归档，
+Windows 归档里的导入对象只允许 Rust std 自带的两个系统 DLL；系统库与框架按名链接。
 
 ### 跨平台逐位一致的前提
 
-Core 的一致性 CI 把锁定提交的 150 个 PCM 用例（离线矩阵，Scene 双耳 / VBAP / Triple Balance / 设备 DSP，
-44.1–96 kHz 重采样）设为 macOS arm64、Linux x64、Windows x64 逐位相同的门禁，依据是 ADR 0015–0017。
-每种分块方式分别比较，跨分块的位相等不是契约。外部 SOFA、Apple 系统渲染器和真实设备不在范围内。
+Core 的一致性 CI 把锁定提交的 PCM 用例（离线矩阵，Scene 双耳 / VBAP / Triple Balance / 设备 DSP，
+44.1–96 kHz 重采样）设为 macOS arm64、Linux x64、Windows x64 逐位相同的门禁，依据是 ADR 0015–0018。
+每种分块方式分别比较，跨分块的位相等不是契约。外部 SOFA、Apple 系统渲染器、真实设备以及房间的
+`REALTIME` 质量档（ADR 0020）不在范围内。
 播放器把 Core 的 Rust 链进自己的依赖图，因此要自己守住这些前提，`scripts/test_render_determinism.py`
 对两个打包目标逐项检查：
 
-- `rustfft` / `realfft` / `rubato` 不启用任何特性。Cargo 在整张依赖图里合并特性，任何依赖只要请求
-  rustfft 的默认特性，就会恢复运行时 AVX/SSE/NEON 分派与 FMA，结果因 CPU 而异；
-- `rustfft` 与 `rubato` 取自 Core 的补丁版本（标量插值、可移植 sin/cos），与 `mradm-ffi` 同一提交；
+- 根 `Cargo.toml` 的 `[patch.crates-io]` 重复 Core 自己的全部补丁：`sofar`、`rubato`、`rustfft`、
+  `realfft`、`ebur128`、`rayon-core`。Cargo 只采用根 workspace 的补丁，少一项 Core 的代码就会链到
+  crates.io 原版；准备好 `MACINRENDER_SOURCE_DIR` 时，测试还与上游 `rust/Cargo.toml` 的补丁列表比对；
+- 这六个 crate 都取自 Core 的同一提交；
+- `rustfft` 的特性恰为 `avx`、`mradm-scalar-default`、`neon`、`sse`：SIMD 内核照常编译，但
+  `mradm-scalar-default` 让默认规划器保持标量，只有房间实时档位显式请求原生规划器；`realfft` 与
+  `rubato` 不启用任何特性；
 - `nalgebra` 启用 `libm-force`，OM spreader 的 SVD 不走平台 C 库；
 - `.cargo/config.toml` 不设 `target-cpu` 或 `+fma` / `+avx`。
 
 ThinLTO 和 `codegen-units = 1` 不改变 Rust 的浮点语义，不在此列。这些检查不等于让播放器的安装包跑一遍
 一致性矩阵；它们只保证链进来的是 Core 验收过的那份代码路径。
 
-**升级 Core 要同时改三处同一个提交**：`crates/macinrender/native/CMakeLists.txt` 的 `GIT_TAG`、
-`crates/macinrender/Cargo.toml` 的 `mradm-ffi`，以及根 `Cargo.toml` `[patch.crates-io]` 里 Core 打过补丁的
-`sofar` / `rubato` / `rustfft`（重采样与 FFT 的逐位一致依赖这些补丁）。三处不一致时 C++ 与 Rust 半边会来自
-不同的 Core。
+**升级 Core 改同一个提交的两处**：`crates/macinrender/Cargo.toml` 的 `mradm-capi` 与 `mradm-islands-sys`，
+以及根 `Cargo.toml` `[patch.crates-io]` 的六项。`scripts/prepare_inputs.py` 从 `mradm-capi` 读出该提交，
+检出到 `.ci-inputs/macinrender` 供安装包取许可证原文；打包时要求它与 Cargo 实际链接的检出是同一提交。
 
-可设置以下开发覆盖，避免修改锁定版本：
-
-```text
-MACINRENDER_SOURCE_DIR=<本地 MacinRender 源码目录>
-MACINRENDER_FETCHCONTENT_DIR=<Cargo target 内的依赖缓存目录>
-MACINRENDER_BUILD_DIR=<可选，跨 Cargo profile 共享原生产物的绝对路径>
-MACINRENDER_BUILD_JOBS=<可选，CMake 及其嵌套 Cargo 的并行上限>
-```
-
-`CMAKE_TOOLCHAIN_FILE` 会传入 CMake。C++ 产物默认位于播放器的 Cargo 构建目录；设置
-`MACINRENDER_BUILD_DIR` 后按源码路径、目标和工具链配置选择共享子目录，构建期间加文件锁。
-各 Cargo profile 都使用同一原生 Release 配置，无需重复编译。Core 的 Rust
-数值内核复用其 `build/rust`，Cargo 区分平台与 profile。源覆盖会跟踪 C++、头文件、CMake 和 Rust 的变化。
-没有 `macinrender` 时不需要 C++ 依赖：`cargo run --no-default-features --features decode` 保留
-Windows 对象直通以及 macOS/Linux 场景预览。`--no-default-features` 为纯检查构建。
+岛的 CMake 产物位于各 Cargo profile 的构建目录，测试、Clippy 与 Release 各编译一次。
+`MRADM_NATIVE_CMAKE_ARGS` 可再传入以 `;` 分隔的 CMake 缓存项（设置它会替换 `[env]` 中的默认值，需自行保留
+`MR_ADM_CORE_USE_INSTALLED_DEPS=OFF`）。没有 `macinrender` 时不需要 CMake 或 C++ 工具链：
+`cargo run --no-default-features --features decode` 保留 Windows 对象直通以及 macOS/Linux 场景预览。
+`--no-default-features` 为纯检查构建。
 
 ```bash
 cargo build --release
 python3 scripts/package-player.py
 ```
 
-播放器直接静态链接 MacinRender C API 与头追桥接源码；完整传递依赖由 CMake File API 提供。
+播放器静态链接 MacinRender C ABI 与头追桥接源码；传递依赖由岛的链接清单提供。
 Mac `.app` 包含运动权限声明及本地签名，Windows 载荷只有 EXE，许可内嵌于 About。
 安装包检查实际载荷、系统依赖、原生渲染及图形窗口，详见 [安装包与 CI](PACKAGING.md)。
 macOS 包使用圆角像素图标，Windows 可执行文件嵌入直角方块图标；窗口图标直接编译进程序。

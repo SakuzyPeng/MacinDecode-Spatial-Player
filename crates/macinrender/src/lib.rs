@@ -2,10 +2,11 @@
 //! cloned controls retain its handles and serialize calls/error-string borrowing.
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
-// Native C++ calls these C exports. Link the kernels as a Rust crate so Cargo
-// and ThinLTO share their standard library with the rest of the application.
+// ADM Core implements its C ABI in Rust. Link that crate rather than its
+// staticlib so Cargo and ThinLTO share one standard library with the player;
+// `raw` declares the `adm_*` exports it provides.
 #[cfg(native_macinrender)]
-extern crate mradm_ffi as _;
+extern crate mradm_capi as _;
 
 mod api;
 #[cfg(target_os = "macos")]
