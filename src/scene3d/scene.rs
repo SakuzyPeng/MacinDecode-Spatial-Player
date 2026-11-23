@@ -154,7 +154,7 @@ pub fn build(
     let stance = if let Some(inside) = input.room {
         add_switching_room(mesh, inside, &view)
     } else {
-        add_panner_box(mesh, PANNER_BOX, 0.0, &view);
+        add_panner_box(mesh, PANNER_BOX, &view);
         add_floor_grid(mesh, |point| point, 0.0, &view);
         Stance::standing(FLOOR_Y)
     };
@@ -165,21 +165,9 @@ pub fn build(
     }
     // The room renderer gives the LFE no position, so only the panner's box
     // has a slot for it, and the switch into the room shrinks it away.
-    let lfe_size = input.room.map_or(1.0, |room| 1.0 - room.stages().morph);
-    if lfe_size > 0.0 {
-        for index in 0..input.lfe_count.max(1) {
-            add_lfe_slot(
-                mesh,
-                LfeSlot {
-                    present: input.has_lfe,
-                    show_number: input.show_element_numbers,
-                    index,
-                    count: input.lfe_count,
-                    size: lfe_size,
-                    floor: floor_of(input.room),
-                },
-                &view,
-            );
+    for index in 0..input.lfe_count.max(1) {
+        if let Some(cabinet) = LfeCabinet::for_slot(index, input.lfe_count, input.room) {
+            cabinet.draw(mesh, input.has_lfe, input.show_element_numbers, &view);
         }
     }
     // An inactive element is one whose metadata is absent or incomplete, so the
@@ -232,100 +220,60 @@ fn seat_colour() -> Rgb {
     Rgb::from_color32(theme::BORDER).lerp(Rgb::from_color32(theme::MUTED), 0.45)
 }
 
-/// The LFE slot: a cabinet sunk into the front wall, centred, on the floor.
-///
-/// It gets no drop line, no floor footprint and no trail. The absence of all
-/// three is the signal that this element has no position — putting a cube out in
-/// the room would claim one it does not have. The slot itself is permanent, so an
-/// absent element leaves its outline and the layout stays learnable.
-pub fn lfe_world_position() -> [f32; 3] {
-    let height = params::LFE_SLAB_HEIGHT;
-    let depth = height * 0.65;
-    [
-        0.0,
-        FLOOR_Y + height / 2.0,
-        -ROOM_HALF_DEPTH + depth * (1.0 - params::LFE_WALL_INSET),
-    ]
-}
-
-pub fn lfe_destination_position(index: usize, count: usize) -> [f32; 3] {
-    let mut position = lfe_world_position();
-    if count > 1 {
-        position[0] = if index == 0 { -0.4 } else { 0.4 };
-    }
-    position
-}
-
-/// One LFE cabinet to draw, and how much of it is left while the switch into
-/// the room shrinks it away.
+/// The cabinet sunk into the front wall. Its mesh and loudness plate share
+/// these dimensions while it shrinks onto the moving floor.
 #[derive(Debug, Clone, Copy)]
-struct LfeSlot {
-    present: bool,
-    show_number: bool,
-    index: usize,
-    count: usize,
-    /// `1.0` in the panner's box.
-    size: f32,
-    /// The floor it shrinks onto.
-    floor: f32,
+pub struct LfeCabinet {
+    pub centre: [f32; 3],
+    pub size: [f32; 3],
 }
 
-fn add_lfe_slot(mesh: &mut MeshBuilder, slot: LfeSlot, view: &ViewContext) {
-    let LfeSlot {
-        present,
-        show_number,
-        index,
-        count,
-        ..
-    } = slot;
-    let width = params::LFE_SLAB_WIDTH;
-    let height = params::LFE_SLAB_HEIGHT;
-    let depth = height * 0.65;
-    let object_colour = Rgb::from_color32(theme::ACCENT);
-    let mut centre = lfe_destination_position(index, count);
-
-    let mut size = [width, height, depth];
-    if slot.size < 1.0 {
-        size = size.map(|edge| edge * slot.size);
-        centre[1] = slot.floor + size[1] / 2.0;
-    }
-    if present {
-        mesh.add_box(centre, size, object_colour, view);
-        if show_number {
-            add_box_number(mesh, 0, centre, size, |_| number_colour(false), view);
+impl LfeCabinet {
+    pub fn for_slot(index: usize, count: usize, room: Option<InRoom<'_>>) -> Option<Self> {
+        let scale = room.map_or(1.0, |room| 1.0 - room.stages().morph);
+        if scale <= 0.0 {
+            return None;
         }
-    } else {
-        mesh.add_wire_box(
-            centre,
-            size,
-            object_colour,
-            params::HAIRLINE_POINTS * 0.8,
-            view,
-        );
+        let height = params::LFE_SLAB_HEIGHT;
+        let depth = height * 0.65;
+        let size = [params::LFE_SLAB_WIDTH, height, depth].map(|edge| edge * scale);
+        let x = match (count > 1, index) {
+            (false, _) => 0.0,
+            (true, 0) => -0.4,
+            (true, _) => 0.4,
+        };
+        let centre = [
+            x,
+            floor_of(room) + size[1] / 2.0,
+            -ROOM_HALF_DEPTH + depth * (1.0 - params::LFE_WALL_INSET),
+        ];
+        Some(Self { centre, size })
+    }
+
+    fn draw(self, mesh: &mut MeshBuilder, present: bool, show_number: bool, view: &ViewContext) {
+        let Self { centre, size } = self;
+        let colour = Rgb::from_color32(theme::ACCENT);
+        if present {
+            mesh.add_box(centre, size, colour, view);
+            if show_number {
+                add_box_number(mesh, 0, centre, size, |_| number_colour(false), view);
+            }
+        } else {
+            mesh.add_wire_box(centre, size, colour, params::HAIRLINE_POINTS * 0.8, view);
+        }
     }
 }
 
-/// The twelve edges of the low rectangular room, as hairlines. This is the
-/// theme's 1px card border promoted into three dimensions.
-///
-/// Given its corners, because the switch into the room view carries the box
-/// onto the unit box, and how far it has faded into the stage, because it
-/// hands over to that dashed box there.
-fn add_panner_box(
-    mesh: &mut MeshBuilder,
-    (low, high): ([f32; 3], [f32; 3]),
-    fade: f32,
-    view: &ViewContext,
-) {
-    let colour = faded(
-        Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25),
-        fade,
-        view,
-    );
+fn box_edge_colour(view: &ViewContext) -> Rgb {
+    Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25)
+}
+
+/// The twelve solid edges of the panner's box at its current bounds.
+fn add_panner_box(mesh: &mut MeshBuilder, (low, high): ([f32; 3], [f32; 3]), view: &ViewContext) {
     mesh.add_wire_box(
         std::array::from_fn(|axis| f32::midpoint(low[axis], high[axis])),
         std::array::from_fn(|axis| high[axis] - low[axis]),
-        colour,
+        box_edge_colour(view),
         params::HAIRLINE_POINTS,
         view,
     );
@@ -346,20 +294,6 @@ fn add_switching_room(mesh: &mut MeshBuilder, inside: InRoom<'_>, view: &ViewCon
     let room = inside.view;
     let stages = inside.stages();
     let floor = floor_of(Some(inside));
-    if stages.rise < 1.0 {
-        // The box travels onto the unit box, then hands over to it.
-        let (unit_low, unit_high) = room.unit_bounds();
-        let (low, high) = PANNER_BOX;
-        add_panner_box(
-            mesh,
-            (
-                mix3(low, unit_low, stages.morph),
-                mix3(high, unit_high, stages.morph),
-            ),
-            stages.rise,
-            view,
-        );
-    }
     if stages.morph < 1.0 {
         // The ruler goes with the floor onto the room's, fading as it goes, so
         // the room's own can take over.
@@ -379,8 +313,9 @@ fn add_switching_room(mesh: &mut MeshBuilder, inside: InRoom<'_>, view: &ViewCon
         add_floor_grid(mesh, onto, stages.morph, view);
     }
     if stages.rise > 0.0 {
-        add_room_view(mesh, room, stages.rise, view);
+        add_room_view(mesh, room, floor, stages.rise, view);
     }
+    add_switching_box(mesh, room, stages, view);
     let seated = room.stance();
     if stages.seat > 0.0 {
         for part in seated.seat(room.floor_y()) {
@@ -412,20 +347,29 @@ fn grown(centre: [f32; 3], size: [f32; 3], amount: f32, floor: f32) -> ([f32; 3]
 ///
 /// The surfaces between the camera and the room are left as edges, so the
 /// inside stays visible from any angle; the far ones are drawn whole, with the
-/// treatment their absorption reads as. Then the metric floor ruler, the
-/// room's twelve edges, and the Scene's unit box — the panner's whole room —
-/// sized by the scene unit, with whatever part of it the walls cut off marked.
+/// treatment their absorption reads as. The metric floor ruler and the room's
+/// twelve edges follow those surfaces.
 ///
 /// `rise` is how far up from its floor the room has grown, and out of the
 /// stage it has come, while the switch builds it; `1.0` is the room.
-fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, rise: f32, view: &ViewContext) {
+fn add_room_view(
+    mesh: &mut MeshBuilder,
+    room: &RoomView,
+    floor: f32,
+    rise: f32,
+    view: &ViewContext,
+) {
     let fade = 1.0 - rise;
-    let floor = room.floor_y();
+    let room_floor = room.floor_y();
     let lift = |point: [f32; 3]| {
         if rise >= 1.0 {
             point
         } else {
-            [point[0], (point[1] - floor).mul_add(rise, floor), point[2]]
+            [
+                point[0],
+                (point[1] - room_floor).mul_add(rise, floor),
+                point[2],
+            ]
         }
     };
     let bare = faded(
@@ -448,7 +392,7 @@ fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, rise: f32, view: &View
             // are decals on it, always win.
             let corners = room
                 .corners(surface)
-                .map(|[x, y, z]| [x, y - params::ROOM_VIEW_FLOOR_SINK, z]);
+                .map(|[x, _, z]| [x, floor - params::ROOM_VIEW_FLOOR_SINK, z]);
             let tone = params::ROOM_VIEW_FLOOR_TONE * room.coverage(surface);
             mesh.add_surface(
                 corners,
@@ -474,8 +418,7 @@ fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, rise: f32, view: &View
     add_room_lines(mesh, room, fade, lift, view);
 }
 
-/// The room view's lines: the floor ruler, the room's edges lifted with its
-/// walls, and the unit box.
+/// The floor ruler and the room's edges travel with the floor and walls.
 fn add_room_lines(
     mesh: &mut MeshBuilder,
     room: &RoomView,
@@ -495,19 +438,15 @@ fn add_room_lines(
         };
         mesh.add_line(
             Layer::Decal,
-            line.from,
-            line.to,
+            lift(line.from),
+            lift(line.to),
             faded(colour, fade, view),
             width,
             view,
         );
     }
 
-    let edge = faded(
-        Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25),
-        fade,
-        view,
-    );
+    let edge = faded(box_edge_colour(view), fade, view);
     for (from, to) in room.edges() {
         mesh.add_line(
             Layer::Line,
@@ -518,46 +457,77 @@ fn add_room_lines(
             view,
         );
     }
+}
 
-    // The unit box is not lifted: it is the panner's box, already where the
-    // switch carried it, coming out of the stage as the box goes into it.
-    let reachable = faded(
-        Rgb::from_color32(theme::MUTED).lerp(view.ink, 0.15),
-        fade,
-        view,
-    );
-    let cut = faded(Rgb::from_color32(theme::WARNING), fade, view);
+/// Open gaps in a single set of edges. Two coincident boxes would compete
+/// in the depth buffer even when an edge is painted the background colour.
+fn add_switching_box(mesh: &mut MeshBuilder, room: &RoomView, stages: Stages, view: &ViewContext) {
+    let (unit_low, unit_high) = room.unit_bounds();
+    let (low, high) = PANNER_BOX;
+    if stages.rise <= 0.0 {
+        add_panner_box(
+            mesh,
+            (
+                mix3(low, unit_low, stages.morph),
+                mix3(high, unit_high, stages.morph),
+            ),
+            view,
+        );
+        return;
+    }
+
+    // While the box is still moving, keep the room's clipping points at
+    // their fractional positions along its edges.
+    let position = |point: [f32; 3]| {
+        if stages.morph >= 1.0 {
+            return point;
+        }
+        let boxed = std::array::from_fn(|axis| {
+            let fraction = (point[axis] - unit_low[axis]) / (unit_high[axis] - unit_low[axis]);
+            mix(low[axis], high[axis], fraction)
+        });
+        mix3(boxed, point, stages.morph)
+    };
+    let edge = box_edge_colour(view);
+    let solid_share = 1.0 - stages.rise;
+    let reachable = Rgb::from_color32(theme::MUTED)
+        .lerp(view.ink, 0.15)
+        .lerp(edge, solid_share);
+    let cut = Rgb::from_color32(theme::WARNING).lerp(edge, solid_share);
     for segment in room.unit_box() {
+        let from = position(segment.from);
+        let to = position(segment.to);
         if segment.reachable {
-            add_dashed(mesh, segment.from, segment.to, reachable, view);
+            add_dashed(mesh, from, to, reachable, stages.rise, view);
         } else {
             mesh.add_line(
                 Layer::Line,
-                segment.from,
-                segment.to,
+                from,
+                to,
                 cut,
-                params::HAIRLINE_POINTS * 1.3,
+                params::HAIRLINE_POINTS * mix(1.0, 1.3, stages.rise),
                 view,
             );
         }
     }
 }
 
-/// A hairline broken into dashes of fixed world length, which is what tells
-/// the unit box apart from the room's own solid edges.
+/// A hairline whose gaps grow from zero to the settled unit box's spacing.
 fn add_dashed(
     mesh: &mut MeshBuilder,
     from: [f32; 3],
     to: [f32; 3],
     colour: Rgb,
+    rise: f32,
     view: &ViewContext,
 ) {
     let span: [f32; 3] = std::array::from_fn(|axis| to[axis] - from[axis]);
     let length = span[0].hypot(span[1]).hypot(span[2]);
     let period = params::ROOM_VIEW_DASH + params::ROOM_VIEW_DASH_GAP;
+    let dash = mix(period, params::ROOM_VIEW_DASH, rise);
     let mut start = 0.0;
     while start < length {
-        let end = (start + params::ROOM_VIEW_DASH).min(length);
+        let end = (start + dash).min(length);
         let at = |distance: f32| -> [f32; 3] {
             std::array::from_fn(|axis| from[axis] + span[axis] * distance / length)
         };
@@ -1524,6 +1494,40 @@ mod tests {
             for axis in 0..3 {
                 let expected = boxed[axis] + (placed[axis] - boxed[axis]) * share;
                 assert!((halfway[axis] - expected).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn room_floor_and_both_rulers_follow_the_moving_footprints() {
+        let room = reference_room();
+        let progress = 0.32;
+        let floor = mix(FLOOR_Y, room.floor_y(), Stages::at(progress).morph);
+        let mesh = switching(&room, progress, &[sounding([0.45, 0.32, 0.38])]);
+        assert!(
+            mesh.solid
+                .as_chunks::<6>()
+                .0
+                .iter()
+                .any(|face| face.iter().all(|v| {
+                    (v.position[1] - (floor - params::ROOM_VIEW_FLOOR_SINK)).abs() < 1e-6
+                }))
+        );
+        // A ruler stroke expands equally either side of its centre line.
+        for quad in mesh.decal.as_chunks::<6>().0 {
+            assert!((f32::midpoint(quad[0].position[1], quad[1].position[1]) - floor).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_unit_box_finishes_its_dashes_without_discarding_an_overlapping_wire() {
+        let room = reference_room();
+        let before = switching(&room, 0.6999, &[]);
+        let after = switching(&room, 0.70, &[]);
+        assert_eq!(before.line.len(), after.line.len());
+        for (a, b) in before.line.iter().zip(&after.line) {
+            for (x, y) in a.position.into_iter().zip(b.position) {
+                assert!((x - y).abs() < 1e-5);
             }
         }
     }

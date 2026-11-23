@@ -1221,7 +1221,7 @@ fn the_object_visual_switches_survive_a_restart() {
 
 #[test]
 fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
-    use crate::scene3d::{room::RoomView, scene::SceneObject, switch::InRoom};
+    use crate::scene3d::{params, room::RoomView, scene::SceneObject, switch::InRoom};
 
     let room = crate::room_package::RoomGeometry::parse(include_str!(
         "../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
@@ -1235,24 +1235,42 @@ fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
     };
     assert_eq!(
         crate::app::nameplate_anchor(&object, Some(InRoom::settled(&room))),
-        Some(room.place(object.position, object.head_locked, object.screen_reference))
+        Some((
+            room.place(object.position, object.head_locked, object.screen_reference),
+            params::OBJECT_EDGE
+        ))
     );
     assert_eq!(
         crate::app::nameplate_anchor(&object, None),
-        Some(crate::scene3d::scene::object_world_position(
-            object.position
+        Some((
+            crate::scene3d::scene::object_world_position(object.position),
+            params::OBJECT_EDGE
         ))
     );
-    let lfe = SceneObject {
-        lfe_slot: Some((0, 1)),
-        active: true,
-        ..SceneObject::default()
-    };
-    assert_eq!(
-        crate::app::nameplate_anchor(&lfe, Some(InRoom::settled(&room))),
-        None
-    );
-    assert!(crate::app::nameplate_anchor(&lfe, None).is_some());
+    for (index, count, expected_x) in [(0, 1, 0.0), (0, 2, -0.4), (1, 2, 0.4)] {
+        let lfe = SceneObject {
+            lfe_slot: Some((index, count)),
+            active: true,
+            ..SceneObject::default()
+        };
+        let anchor = |progress| {
+            crate::app::nameplate_anchor(
+                &lfe,
+                Some(InRoom {
+                    view: &room,
+                    progress,
+                }),
+            )
+        };
+        assert_eq!(anchor(0.0), crate::app::nameplate_anchor(&lfe, None));
+        let ([x, y, _], height) = anchor(0.2).expect("half-size cabinet still has a plate");
+        assert!((x - expected_x).abs() < 1e-6);
+        assert!((height - params::LFE_SLAB_HEIGHT / 2.0).abs() < 1e-6);
+        let floor = f32::midpoint(params::ROOM_FLOOR_Y, room.floor_y());
+        assert!((y - height / 2.0 - floor).abs() < 1e-6);
+        assert_eq!(anchor(0.4), None);
+        assert_eq!(anchor(1.0), None);
+    }
 }
 
 #[test]

@@ -173,7 +173,11 @@ impl RoomSwitch {
     #[must_use]
     pub fn moving(&self, now: Instant) -> bool {
         let progress = self.progress(now);
-        self.since.is_some() && progress > 0.0 && progress < 1.0
+        if self.entering {
+            progress < 1.0
+        } else {
+            progress > 0.0
+        }
     }
 
     fn progress(&self, now: Instant) -> f32 {
@@ -281,6 +285,10 @@ mod tests {
 
         let (_, progress) = switch.follow(Some(room()), pose, start).unwrap();
         assert_eq!(progress, 0.0);
+        assert!(
+            switch.moving(start),
+            "entering must schedule its second frame"
+        );
         let half = params::ROOM_SWITCH_SECONDS / 2.0;
         let (_, progress) = switch
             .follow(Some(room()), pose, after(start, half))
@@ -305,13 +313,14 @@ mod tests {
 
         let entered = after(start, 10.0);
         switch.follow(Some(room()), pose, entered);
-        let (_, progress) = switch
-            .follow(
-                Some(room()),
-                pose,
-                after(entered, params::ROOM_SWITCH_SECONDS + 1.0),
-            )
-            .unwrap();
+        let settled = after(entered, params::ROOM_SWITCH_SECONDS + 1.0);
+        let (_, progress) = switch.follow(Some(room()), pose, settled).unwrap();
         assert_eq!(progress, 1.0);
+        assert!(!switch.moving(settled));
+        assert_eq!(switch.follow(None, pose, settled).unwrap().1, 1.0);
+        assert!(
+            switch.moving(settled),
+            "leaving must schedule its second frame"
+        );
     }
 }

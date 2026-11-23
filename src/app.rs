@@ -2933,37 +2933,21 @@ impl PlayerApp {
         // Without a depth buffer this is the only ordering available, and it is
         // at least the ordering the objects themselves have.
         let direction = self.camera.direction();
-        let world_position =
-            |object: &scene3d::scene::SceneObject<'_>| nameplate_anchor(object, room);
-        let mut order: Vec<usize> = (0..objects.len())
-            .filter(|&index| world_position(&objects[index]).is_some())
+        let mut plates: Vec<_> = objects
+            .iter()
+            .filter(|object| object.active)
+            .filter_map(|object| {
+                let ([x, y, z], height) = nameplate_anchor(object, room)?;
+                let depth = x * direction[0] + y * direction[1] + z * direction[2];
+                let point = [x, y + height / 2.0 + scene3d::params::NAMEPLATE_OFFSET, z];
+                Some((depth, point, object))
+            })
             .collect();
-        order.sort_by(|left, right| {
-            let depth = |index: usize| {
-                let position = world_position(&objects[index]).unwrap_or_default();
-                position[0] * direction[0] + position[1] * direction[1] + position[2] * direction[2]
-            };
-            depth(*left).total_cmp(&depth(*right))
-        });
+        plates.sort_by(|(left, ..), (right, ..)| left.total_cmp(right));
 
         let painter = ui.painter().with_clip_rect(stage);
-        for index in order {
-            let object = &objects[index];
-            if !object.active {
-                continue;
-            }
-            let Some([x, y, z]) = world_position(object) else {
-                continue;
-            };
-            let height = if object.lfe_slot.is_some() {
-                scene3d::params::LFE_SLAB_HEIGHT
-            } else {
-                scene3d::params::OBJECT_EDGE
-            };
-            let anchor = self.camera.project(
-                [x, y + height / 2.0 + scene3d::params::NAMEPLATE_OFFSET, z],
-                stage,
-            );
+        for (_, point, object) in plates {
+            let anchor = self.camera.project(point, stage);
             // A plate that says nothing but -∞ forever is what crowds the
             // view, so it steps back as soon as it has nothing to report and,
             // once the fade has carried it all the way out, is not laid out at
@@ -4363,26 +4347,24 @@ fn draw_catalog_files(
     (clicked, hovered)
 }
 
-/// The name a profile goes by on screen. The folder is one line above it and the
-/// full path is rarely the useful half.
-/// Where a nameplate's object is, by the same placement the mesh uses, so a
-/// plate cannot float over a spot its cube is not at. The room view has no LFE
-/// slot to label.
+/// Centre and height of the geometry under a nameplate. An LFE cabinet has
+/// an anchor until the room switch shrinks its mesh to zero.
 fn nameplate_anchor(
     object: &scene3d::scene::SceneObject<'_>,
     room: Option<scene3d::switch::InRoom<'_>>,
-) -> Option<[f32; 3]> {
+) -> Option<([f32; 3], f32)> {
     match object.lfe_slot {
-        Some(_) if room.is_some() => None,
-        Some((index, count)) => Some(scene3d::scene::lfe_destination_position(index, count)),
-        None => Some(scene3d::scene::object_position(
-            object,
-            object.position,
-            room,
+        Some((index, count)) => scene3d::scene::LfeCabinet::for_slot(index, count, room)
+            .map(|cabinet| (cabinet.centre, cabinet.size[1])),
+        None => Some((
+            scene3d::scene::object_position(object, object.position, room),
+            scene3d::params::OBJECT_EDGE,
         )),
     }
 }
 
+/// The name a profile goes by on screen. The folder is one line above it and the
+/// full path is rarely the useful half.
 fn profile_name(path: &str) -> String {
     Path::new(path)
         .file_name()

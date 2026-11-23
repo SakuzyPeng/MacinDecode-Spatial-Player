@@ -1,5 +1,4 @@
-//! Compare scene-only MSAA compositing against the former full-window MSAA pass
-//! on an actual GPU, without a window or audio device.
+//! Offscreen GPU checks for scene compositing and depth occlusion.
 use super::*;
 use crate::scene3d::skin::{
     BodyType, Skin,
@@ -68,8 +67,12 @@ fn callback(rect: Rect, skin: Option<&crate::scene3d::skin::Skin>) -> SceneCallb
             ..Default::default()
         },
     );
+    scene_callback(rect, &camera, &mesh)
+}
+
+fn scene_callback(rect: Rect, camera: &Camera, mesh: &MeshBuilder) -> SceneCallback {
     let mut callback =
-        SceneCallback::new(&mesh, camera.view_projection(rect.width() / rect.height()));
+        SceneCallback::new(mesh, camera.view_projection(rect.width() / rect.height()));
     callback.rect = rect;
     callback
 }
@@ -105,10 +108,10 @@ fn render(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
-    rect: Rect,
+    callback: &SceneCallback,
     reference: bool,
-    skin: Option<&crate::scene3d::skin::Skin>,
 ) -> Vec<u8> {
+    let rect = callback.rect;
     let screen = ScreenDescriptor {
         size_in_pixels: [WIDTH, HEIGHT],
         pixels_per_point: 1.5,
@@ -119,7 +122,6 @@ fn render(
         pixels_per_point: screen.pixels_per_point,
         screen_size_px: screen.size_in_pixels,
     };
-    let callback = callback(rect, skin);
     let mut resources = CallbackResources::default();
     resources.insert(SceneRenderer::new(device, format));
     let output = texture(device, format, 1);
@@ -248,16 +250,19 @@ fn render(
     bytes
 }
 
-#[test]
-#[ignore = "requires a GPU adapter; compares real offscreen MSAA and compositing"]
-fn composite_preserves_scene_colours_occlusion_and_antialiasing() {
+fn device_and_queue() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::default();
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .unwrap();
     eprintln!("GPU scene regression: {:?}", adapter.get_info());
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap()
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; compares real offscreen MSAA and compositing"]
+fn composite_preserves_scene_colours_occlusion_and_antialiasing() {
+    let (device, queue) = device_and_queue();
     let skins = [BodyType::Steve, BodyType::Alex].map(|model| {
         let mut image = sample_image(model, false);
         for y in 8..16 {
@@ -277,8 +282,9 @@ fn composite_preserves_scene_colours_occlusion_and_antialiasing() {
                 Rect::from_min_max(pos2(-12.0, -5.0), pos2(125.0, 115.0)),
                 Rect::from_min_max(pos2(60.0, 40.0), pos2(185.0, 145.0)),
             ] {
-                let before = render(&device, &queue, format, rect, true, skin);
-                let after = render(&device, &queue, format, rect, false, skin);
+                let callback = callback(rect, skin);
+                let before = render(&device, &queue, format, &callback, true);
+                let after = render(&device, &queue, format, &callback, false);
                 let maximum = before
                     .iter()
                     .zip(&after)
@@ -302,4 +308,87 @@ fn composite_preserves_scene_colours_occlusion_and_antialiasing() {
             }
         }
     }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter to check the room switch against the depth buffer"]
+fn room_switch_keeps_footprints_visible_and_opens_the_dashed_edges_smoothly() {
+    use crate::scene3d::{camera::Preset, room::RoomView, switch::InRoom};
+
+    let (device, queue) = device_and_queue();
+    let geometry = crate::room_package::RoomGeometry::parse(include_str!(
+        "../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
+    ))
+    .unwrap();
+    let room = RoomView::new(&geometry, Some(1.0));
+    let rect = Rect::from_min_max(pos2(12.0, 10.0), pos2(150.0, 120.0));
+    let build = |camera: &Camera, progress, objects: &[SceneObject<'_>]| {
+        let mut mesh = MeshBuilder::default();
+        scene::build(
+            &mut mesh,
+            camera,
+            rect.height(),
+            SceneInput {
+                objects,
+                room: Some(InRoom {
+                    view: &room,
+                    progress,
+                }),
+                ..Default::default()
+            },
+        );
+        mesh
+    };
+    let capture = |camera: &Camera, mesh: &MeshBuilder| {
+        let callback = scene_callback(rect, camera, mesh);
+        render(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &callback,
+            false,
+        )
+    };
+    let changed_pixels = |a: &[u8], b: &[u8]| {
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .filter(|(a, b)| (0..3).any(|channel| a[channel].abs_diff(b[channel]) > 10))
+            .count()
+    };
+
+    let camera = Camera::default();
+    let object = SceneObject {
+        position: [0.45, 0.32, 0.38],
+        active: true,
+        gain: 1.0,
+        presence: 1.0,
+        ..Default::default()
+    };
+    for progress in [0.31, 0.32] {
+        let room_decals = build(&camera, progress, &[]).decal.len();
+        let mut mesh = build(&camera, progress, &[object]);
+        let with_mark = capture(&camera, &mesh);
+        mesh.decal.truncate(room_decals);
+        let visible = changed_pixels(&with_mark, &capture(&camera, &mesh));
+        assert!(
+            visible >= 4,
+            "only {visible} footprint pixels visible at {progress}"
+        );
+    }
+
+    // From directly behind, the old solid wire and the finished dashes
+    // would have exactly equal depth. Adjacent frames must agree across
+    // the handover, allowing a few MSAA samples to cross a pixel boundary.
+    let mut back = Camera::default();
+    back.apply_preset(Preset::Back, rect.width() / rect.height());
+    back.advance(2.0);
+    let before = capture(&back, &build(&back, 0.6999, &[]));
+    let after = capture(&back, &build(&back, 0.7, &[]));
+    let changed = changed_pixels(&before, &after);
+    assert!(
+        changed <= 4,
+        "{changed} pixels jumped as the box finished opening its dashes"
+    );
 }
