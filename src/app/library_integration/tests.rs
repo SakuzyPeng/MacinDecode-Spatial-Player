@@ -331,6 +331,67 @@ fn separating_the_ears_starts_from_the_shared_profile_and_edits_one_ear() {
     assert_eq!(app.output.settings().hptf_ears(), [profile.as_str(), ""]);
     let output = ui_frame(&mut app, &context, 6.0, vec![]);
     let _ = widget(&output, "Right: none");
+
+    let _ = click_widget(&mut app, &context, widget(&output, "Separate ears"), 7.0);
+    assert_eq!(app.output.settings().hptf_ears(), [profile.as_str(); 2]);
+    let output = ui_frame(&mut app, &context, 8.0, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Separate ears"), 9.0);
+    assert!(app.output.settings().hptf_separate_ears);
+    assert_eq!(app.output.settings().hptf_ears(), [profile.as_str(), ""]);
+}
+
+#[test]
+#[cfg(macinrender_output)]
+fn the_ear_without_a_profile_displays_its_adjusted_and_trimmed_response() {
+    use crate::app::OutputPage;
+    use crate::backend::{OutputSettings, SpatialBackendKind};
+    use crate::head_tracking::HeadSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    crate::theme::install(&context);
+    let left = dir.path().join("left.txt");
+    std::fs::write(
+        &left,
+        "Preamp: 0 dB\nFilter 1: ON PK Fc 1000 Hz Gain 6 dB Q 1\n",
+    )
+    .unwrap();
+    let left = left.to_str().unwrap();
+    app.output.install_settings(OutputSettings {
+        null_output: true,
+        mode: SpatialBackendKind::SafBinaural,
+        head_source: HeadSource::Off,
+        hptf: left.to_owned(),
+        hptf_separate_ears: true,
+        hptf_right: Some(String::new()),
+        hptf_bass_db: 3.0,
+        hptf_auto_trim: true,
+        ..Default::default()
+    });
+    app.activate_demo(true);
+    until(&mut app, &context, |app| {
+        app.output.active_hptf() == Some([left, ""])
+    });
+    app.output_settings_open = true;
+    app.output_page = OutputPage::Headphones;
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let _ = ui_frame(&mut app, &context, 0.1, vec![]);
+
+    let right = app.output.hptf_readout()[1];
+    assert_eq!(right.bands, 1);
+    assert!(right.auto_trim_db < 0.0);
+    let drawn = app
+        .hptf_drawing_right
+        .as_ref()
+        .unwrap()
+        .running()
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        crate::app::hptf_disagreement(&drawn.with_output_trim(right.auto_trim_db), &right),
+        None
+    );
 }
 
 #[test]
@@ -1886,13 +1947,14 @@ fn saving_with_separate_ears_writes_one_profile_per_ear() {
 
     let write = |name: &str, text: &str| {
         let path = app.hptf.root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, text).unwrap();
         path.to_str().unwrap().to_owned()
     };
     let left_text = "Preamp: -1 dB\nFilter 1: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
     let right_text = "Preamp: -2 dB\n";
-    let left = write("left.txt", left_text);
-    let right = write("right.txt", right_text);
+    let left = write("left/EQ.txt", left_text);
+    let right = write("right/eq.txt", right_text);
     let adjustment = Adjustment {
         bass_db: 2.5,
         tilt_db_per_octave: 0.0,
@@ -1900,14 +1962,20 @@ fn saving_with_separate_ears_writes_one_profile_per_ear() {
     let mut settings = app.output.settings().clone();
     settings.hptf.clone_from(&left);
     settings.hptf_separate_ears = true;
-    settings.hptf_right.clone_from(&right);
+    settings.hptf_right = Some(right.clone());
     settings.hptf_bass_db = 2.5;
     app.change_output_settings(settings.clone(), &context);
-    crate::app::hptf_curve(&mut app.hptf_drawing, &left, 48_000, adjustment);
-    crate::app::hptf_curve(&mut app.hptf_drawing_right, &right, 48_000, adjustment);
+    crate::app::hptf_curve(&mut app.hptf_drawing, Some(&left), 48_000, adjustment);
+    crate::app::hptf_curve(
+        &mut app.hptf_drawing_right,
+        Some(&right),
+        48_000,
+        adjustment,
+    );
 
     let staged = app.stage_tuned_hptf(&settings, adjustment).unwrap();
     assert_eq!(staged.files.len(), 2);
+    assert_ne!(staged.files[0].parent(), staged.files[1].parent());
     app.hptf_saving = Some(staged.directory);
     app.hptf_targets = staged.targets;
     app.hptf.refresh(staged.files, &context);
@@ -1915,19 +1983,23 @@ fn saving_with_separate_ears_writes_one_profile_per_ear() {
 
     let saved = app.output.settings().clone();
     assert!(saved.hptf_separate_ears);
+    let [left_saved, right_saved] = saved.hptf_ears();
     assert!(
-        saved.hptf.ends_with("left (bass +2.5 dB).txt"),
-        "{}",
-        saved.hptf
+        left_saved.ends_with("EQ (bass +2.5 dB).txt"),
+        "{left_saved}"
     );
     assert!(
-        saved.hptf_right.ends_with("right (bass +2.5 dB).txt"),
-        "{}",
-        saved.hptf_right
+        Path::new(right_saved)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("eq (bass +2.5 dB)"),
+        "{right_saved}"
     );
     assert!(saved.hptf_bass_db == 0.0 && saved.hptf_tilt_db == 0.0);
     assert!(app.hptf_targets.is_empty() && app.hptf_saving.is_none());
-    for (landed, text) in [(&saved.hptf, left_text), (&saved.hptf_right, right_text)] {
+    for (landed, text) in [(left_saved, left_text), (right_saved, right_text)] {
         let expected = Profile::parse(text).unwrap().with(adjustment).unwrap();
         let landed = Profile::parse(&std::fs::read_to_string(landed).unwrap()).unwrap();
         assert_eq!(expected.disagreement(&landed), None);
@@ -1936,14 +2008,14 @@ fn saving_with_separate_ears_writes_one_profile_per_ear() {
     // One file on both ears is saved once, for both.
     let mut settings = saved;
     settings.hptf.clone_from(&left);
-    settings.hptf_right.clone_from(&left);
+    settings.hptf_right = Some(left.clone());
     settings.hptf_bass_db = 1.0;
     app.change_output_settings(settings.clone(), &context);
     let adjustment = Adjustment {
         bass_db: 1.0,
         tilt_db_per_octave: 0.0,
     };
-    crate::app::hptf_curve(&mut app.hptf_drawing, &left, 48_000, adjustment);
+    crate::app::hptf_curve(&mut app.hptf_drawing, Some(&left), 48_000, adjustment);
     let staged = app.stage_tuned_hptf(&settings, adjustment).unwrap();
     assert_eq!(staged.files.len(), 1);
     app.hptf_saving = Some(staged.directory);
@@ -1952,11 +2024,11 @@ fn saving_with_separate_ears_writes_one_profile_per_ear() {
     settle_hptf_catalog(&mut app, &context);
     let saved = app.output.settings();
     assert!(
-        saved.hptf.ends_with("left (bass +1.0 dB).txt"),
+        saved.hptf.ends_with("EQ (bass +1.0 dB).txt"),
         "{}",
         saved.hptf
     );
-    assert_eq!(saved.hptf, saved.hptf_right);
+    assert_eq!(saved.hptf_right.as_deref(), Some(saved.hptf.as_str()));
 
     app.flush_persistence();
     app.library.shutdown();

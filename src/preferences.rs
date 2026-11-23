@@ -133,11 +133,10 @@ impl AppPreferences {
     /// directory at their copies in this one.
     pub fn relocated(mut self, directory: &DataDirectory) -> Self {
         if let Some(legacy) = &directory.legacy {
-            for path in [
-                &mut self.output.sofa,
-                &mut self.output.hptf,
-                &mut self.output.hptf_right,
-            ] {
+            for path in [&mut self.output.sofa, &mut self.output.hptf]
+                .into_iter()
+                .chain(self.output.hptf_right.iter_mut())
+            {
                 migration::relocate(path, legacy, &directory.path);
             }
         }
@@ -345,14 +344,16 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         prefs.output.hptf = external.to_string_lossy().into_owned();
-        prefs.output.hptf_right = legacy
-            .join("hptf")
-            .join("right.txt")
-            .to_string_lossy()
-            .into_owned();
+        prefs.output.hptf_right = Some(
+            legacy
+                .join("hptf")
+                .join("right.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let prefs = prefs.relocated(&directory);
         assert_eq!(
-            Path::new(&prefs.output.hptf_right),
+            Path::new(prefs.output.hptf_right.as_deref().unwrap()),
             current.join("hptf").join("right.txt")
         );
         assert_eq!(

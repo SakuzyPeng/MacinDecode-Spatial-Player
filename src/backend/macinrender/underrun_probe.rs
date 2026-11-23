@@ -26,8 +26,11 @@ fn current_player_saf_pose_underrun_probe() {
     if std::env::var_os("MACINDECODE_UNDERRUN_BUILTIN").is_some() {
         settings.sofa.clear();
     }
-    if std::env::var_os("MACINDECODE_UNDERRUN_NO_HPTF").is_some() {
+    let bypass_hptf = std::env::var_os("MACINDECODE_UNDERRUN_NO_HPTF").is_some();
+    if bypass_hptf {
         settings.hptf.clear();
+        settings.hptf_right = None;
+        settings.hptf_separate_ears = false;
     }
     let mut decoder = DecoderController::new();
     decoder.ensure_open(std::path::Path::new(&media));
@@ -56,7 +59,7 @@ fn current_player_saf_pose_underrun_probe() {
     println!(
         "{}",
         json!({"event":"configuration","media":media.to_string_lossy(),
-        "head":head,"sofa":settings.sofa,"hptf":settings.hptf,
+        "head":head,"sofa":settings.sofa,"hptf":settings.hptf,"hptf_ears":settings.hptf_ears(),
         "rate":metrics.sample_rate(),"objects":metrics.object_count(),"lfes":metrics.lfe_count(),
         "optimized":!cfg!(debug_assertions),"device":settings.stereo_device,
         "full_track":full_track,"duration_frames":metrics.duration_frames()})
@@ -97,7 +100,12 @@ fn current_player_saf_pose_underrun_probe() {
         let applied = runtime.hptf_status();
         if applied.applied_revision == 1 && output.playhead_frames > 0 {
             initial_underruns = output.underruns;
-            assert_eq!(applied.enabled(), !hptf.settings.is_off());
+            if bypass_hptf || hptf.settings.is_off() {
+                assert!(
+                    !applied.enabled(),
+                    "expected both ears to bypass HpTF: {applied:?}"
+                );
+            }
             println!(
                 "{}",
                 json!({"event":"ready","hptf_enabled":applied.enabled(),

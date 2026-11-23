@@ -2064,15 +2064,15 @@ impl PlayerApp {
         settings: &mut OutputSettings,
         context: &egui::Context,
     ) -> Option<String> {
-        let was_separate = settings.hptf_separate_ears;
-        ui.checkbox(&mut settings.hptf_separate_ears, "Separate ears")
+        let mut separate = settings.hptf_separate_ears;
+        if ui
+            .checkbox(&mut separate, "Separate ears")
             .on_hover_text(
                 "Give each ear its own profile, such as one measured on each side. Bass, Tilt and the trim stay common to both ears.",
-            );
-        // Separating starts from what both ears were already running, so the
-        // switch itself changes nothing that can be heard.
-        if settings.hptf_separate_ears && !was_separate && settings.hptf_right.is_empty() {
-            settings.hptf_right.clone_from(&settings.hptf);
+            )
+            .changed()
+        {
+            settings.set_hptf_separate_ears(separate);
         }
         let edited = self.hptf_edited(settings);
         // Name the file and nothing else. A ParametricEQ profile carries no
@@ -2175,6 +2175,7 @@ impl PlayerApp {
         let readouts = self.output.hptf_readout();
         let separate = settings.hptf_separate_ears;
         let ears = settings.hptf_ears();
+        let chosen = settings.hptf_chosen();
         // Running means these profiles *and* these knobs: a
         // slider that has moved but not yet reached the
         // audio must not be called applied.
@@ -2196,13 +2197,18 @@ impl PlayerApp {
         };
         let edited = self.hptf_edited(settings);
         let ghost_path = hptf_ghost(hovered, edited.profile(settings));
-        let left = hptf_curve(&mut self.hptf_drawing, ears[0], rate, adjustment);
-        let right = if separate {
-            hptf_curve(&mut self.hptf_drawing_right, ears[1], rate, adjustment)
-        } else {
-            self.hptf_drawing_right = None;
-            None
-        };
+        let left = hptf_curve(
+            &mut self.hptf_drawing,
+            chosen.then_some(ears[0]),
+            rate,
+            adjustment,
+        );
+        let right = hptf_curve(
+            &mut self.hptf_drawing_right,
+            (separate && chosen).then_some(ears[1]),
+            rate,
+            adjustment,
+        );
         let drawings: Vec<(Ear, Option<&HptfDrawing>)> = if separate {
             vec![(Ear::Left, left), (Ear::Right, right)]
         } else {
@@ -2213,7 +2219,7 @@ impl PlayerApp {
         // not to the file being pointed at.
         let ghost = hptf_curve(
             &mut self.hptf_ghost,
-            ghost_path.unwrap_or_default(),
+            ghost_path,
             rate,
             crate::hptf_profile::Adjustment::default(),
         );
@@ -2321,7 +2327,7 @@ impl PlayerApp {
                     separate.then(|| (ear, ears[ear as usize].is_empty())),
                 );
             }
-        } else if settings.hptf_chosen() {
+        } else if chosen {
             ui.label("Selected; not yet running.");
         }
         if save_requested {
@@ -2350,7 +2356,7 @@ impl PlayerApp {
         let [left, right] = settings.hptf_ears();
         let tuned = |drawing: Option<&HptfDrawing>, path: &str| {
             if path.is_empty() {
-                crate::hptf_profile::Profile::of_bands(0.0, Vec::new()).with(adjustment)
+                crate::hptf_profile::Profile::default().with(adjustment)
             } else {
                 drawing
                     .filter(|drawing| drawing.path == path)
@@ -4238,7 +4244,7 @@ fn draw_hptf_readout(
 }
 
 /// Write tuned profiles into a staging directory for the catalog to import,
-/// each beside the source it was tuned from (empty for an ear that had none).
+/// with its original base name and adjustment (or "Adjustment" for a bare ear).
 ///
 /// The provenance goes in a comment both parsers skip. The knobs stop being
 /// separate here, and that line is the only thing that will still say so.
@@ -4250,21 +4256,13 @@ fn stage_tuned_profiles(
     adjustment: crate::hptf_profile::Adjustment,
 ) -> Result<(tempfile::TempDir, Vec<PathBuf>), String> {
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let mut files: Vec<PathBuf> = Vec::new();
-    for &(profile, source) in tuned {
-        let mut file = directory
-            .path()
-            .join(adjusted_profile_name(source, adjustment));
-        // Two ears tuned from two files of one name would land on one file.
-        for index in 2_u32.. {
-            if !files.contains(&file) {
-                break;
-            }
-            file = directory.path().join(format!(
-                "{} {index}.txt",
-                adjusted_profile_name(source, adjustment).trim_end_matches(".txt")
-            ));
-        }
+    let mut files = Vec::with_capacity(tuned.len());
+    for (index, &(profile, source)) in tuned.iter().enumerate() {
+        // Keep each write independent even when the volume treats the two
+        // names as equal. The catalog resolves destination collisions.
+        let folder = directory.path().join(index.to_string());
+        std::fs::create_dir(&folder).map_err(|e| e.to_string())?;
+        let file = folder.join(adjusted_profile_name(source, adjustment));
         let origin = if source.is_empty() {
             "No profile".to_owned()
         } else {
@@ -4608,14 +4606,14 @@ impl Ear {
     fn profile(self, settings: &OutputSettings) -> &str {
         match self {
             Self::Left => &settings.hptf,
-            Self::Right => &settings.hptf_right,
+            Self::Right => settings.hptf_right.as_deref().unwrap_or_default(),
         }
     }
 
     fn profile_mut(self, settings: &mut OutputSettings) -> &mut String {
         match self {
             Self::Left => &mut settings.hptf,
-            Self::Right => &mut settings.hptf_right,
+            Self::Right => settings.hptf_right.get_or_insert_with(String::new),
         }
     }
 }
@@ -4675,6 +4673,9 @@ impl HptfDrawing {
     /// The file alone, but only while the knobs have moved it off itself —
     /// otherwise the two lines would be one line drawn twice.
     fn reference(&self) -> Option<&crate::hptf_profile::Curve> {
+        if self.path.is_empty() {
+            return None;
+        }
         self.adjusted.as_ref().and(self.curve.as_ref().ok())
     }
 }
@@ -4705,7 +4706,8 @@ fn adjusted_profile_name(path: &str, adjustment: crate::hptf_profile::Adjustment
 }
 
 /// The drawing for `path` at `rate`, kept in `slot` and re-read from disk only
-/// when one of them changes. An empty path is "no profile", and clears the slot.
+/// when one of them changes. `None` clears the slot. An empty path draws the
+/// response of an ear without a profile, including the shared adjustment.
 ///
 /// A biquad's response depends on the rate it was designed at, so the rate is
 /// half of the key: the same file at two rates is two curves. The cross-check
@@ -4714,28 +4716,29 @@ fn adjusted_profile_name(path: &str, adjustment: crate::hptf_profile::Adjustment
 /// a profile can be checked while it is being looked at, not only once it plays.
 fn hptf_curve<'a>(
     slot: &'a mut Option<HptfDrawing>,
-    path: &str,
+    path: Option<&str>,
     rate: u32,
     adjustment: crate::hptf_profile::Adjustment,
 ) -> Option<&'a HptfDrawing> {
-    if path.is_empty() {
+    let Some(path) = path else {
         *slot = None;
         return None;
-    }
+    };
     if slot
         .as_ref()
         .is_none_or(|drawing| drawing.path != path || drawing.rate != rate)
     {
-        let text = std::fs::read_to_string(path).map_err(|error| error.to_string());
-        let ours = text
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|text| crate::hptf_profile::Profile::parse(text));
+        let text = (!path.is_empty()).then(|| std::fs::read_to_string(path));
+        let ours = match &text {
+            Some(Ok(text)) => crate::hptf_profile::Profile::parse(text),
+            Some(Err(error)) => Err(error.to_string()),
+            None => Ok(crate::hptf_profile::Profile::default()),
+        };
         // Two independent readings of one documented format. All four outcomes
         // say something; only "both read it the same way" says nothing.
         let renderer = text
             .as_ref()
-            .ok()
+            .and_then(|text| text.as_ref().ok())
             .and_then(|text| crate::backend::hptf_parse(text));
         let disagreement = match (&ours, &renderer) {
             (Ok(ours), Some(Ok(renderer))) => ours.disagreement(renderer),
@@ -6483,7 +6486,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(
             hptf_curve(
                 &mut slot,
-                first,
+                Some(first),
                 48_000,
                 crate::hptf_profile::Adjustment::default()
             )
@@ -6497,7 +6500,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(
             hptf_curve(
                 &mut slot,
-                first,
+                Some(first),
                 48_000,
                 crate::hptf_profile::Adjustment::default()
             )
@@ -6509,7 +6512,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(
             hptf_curve(
                 &mut slot,
-                first,
+                Some(first),
                 44_100,
                 crate::hptf_profile::Adjustment::default()
             )
@@ -6519,7 +6522,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(
             hptf_curve(
                 &mut slot,
-                second,
+                Some(second),
                 44_100,
                 crate::hptf_profile::Adjustment::default()
             )
@@ -6531,7 +6534,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(
             hptf_curve(
                 &mut slot,
-                "",
+                None,
                 44_100,
                 crate::hptf_profile::Adjustment::default()
             )

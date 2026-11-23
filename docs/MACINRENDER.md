@@ -278,19 +278,21 @@ C ABI 1.50 的 `adm_scene_output_set_hptf_stereo_ex`（左右各一个文件）�
 但仍承受**两耳共同**的 `AUTO_TRIM` 衰减；两耳配置不同时旧的单耳 `get_hptf_info` 返回 UNSUPPORTED。
 所以播放器读状态**一律**走双耳查询，`HptfStatus` 按耳给出 `left` / `right`，`applied_revision` 只有一个。
 
-设置里 `hptf` 是共用或左耳的 profile，`hptf_separate_ears` 打开时 `hptf_right` 是右耳的（可以为空）；
-关闭时 `hptf_right` 保留，不送给任何一只耳朵。旧设置没有这两个字段，读回来就是共用，不需要迁移。
+设置里 `hptf` 是共用或左耳的 profile，`hptf_separate_ears` 打开时使用右耳的 `hptf_right`。
+该字段缺失时，第一次分耳沿用共用配置。空字符串表示主动关闭右耳的 profile，切换回共用模式时也会记住这个选择。
 `HptfSettings::right` 为 `None` 时走原来的单耳入口，所以不分耳的路径与改动前完全相同。
 
-Bass 与 Tilt 两耳共用：它们是听者的偏好，不是耳机左右的差异。旋钮离开零点时两耳各自"文件 + 派生段"，
-没有文件的一耳只有派生段（`Profile::of_bands(0, [])` 再附加），一起经 stereo parameters 下发。
+Bass 与 Tilt 两耳共用。旋钮离开零点时，两耳各自在基础响应上叠加派生段，再一起经 stereo parameters 下发。
+没有文件的一耳以 0 dB 为基础，响应图也绘制这一耳的调整和自动衰减。
 
 失败恢复按整对进行：`restore_accepted_hptf` 把左右路径、是否分耳、auto trim 和旋钮一起退回最后一次被接受的请求。
+如果从共用切换到分耳时准备失败，回到共用模式后会清除这次被拒绝的右耳路径，下次分耳可从共用配置开始。
 `active_hptf` 返回 `[左, 右]`（共用时同一路径两次），目录列表里两份都标 **in use**；面板按耳画两条曲线
 （左用强调色、右用 `SUCCESS` 绿），解析对账、运行对账与读数都逐耳进行。
 
 「Save as profile…」在分耳时每耳各写一份（来源相同则只写一份、两耳共用），文件导入改为
 `Catalog::refresh(Vec<PathBuf>)` 按序导入多份，`hptf_targets` 记下每份对应哪只耳朵；选中与旋钮归零仍是同一次 settings 变更。
+每份文件单独暂存，导入器负责处理目标目录重名。批次失败时会回滚本次创建的文件。
 
 ### 存成 profile
 

@@ -111,13 +111,7 @@ impl Catalog {
         match std::thread::Builder::new()
             .name(format!("{}-catalog", kind.slug))
             .spawn(move || {
-                let result = (|| {
-                    let imported = imports
-                        .iter()
-                        .map(|source| import_file(kind, &root, source, &cancelled))
-                        .collect::<Result<Vec<_>>>()?;
-                    Ok((scan(kind, &root, previous, &cancelled)?, imported))
-                })();
+                let result = import_and_scan(kind, &root, previous, &imports, &cancelled);
                 let _ = sender.send(result);
                 context.request_repaint();
             }) {
@@ -182,6 +176,58 @@ fn copy_hash(
 fn fingerprint(path: &Path, cancelled: &AtomicBool) -> Result<String> {
     copy_hash(&mut File::open(path)?, &mut std::io::sink(), cancelled)
 }
+
+fn import_and_scan(
+    kind: Kind,
+    root: &Path,
+    previous: Vec<Entry>,
+    sources: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<(Vec<Entry>, Vec<PathBuf>)> {
+    let mut imported = Vec::with_capacity(sources.len());
+    let result = (|| {
+        for source in sources {
+            imported.push(import_file(kind, root, source, cancelled)?);
+        }
+        scan(kind, root, previous, cancelled)
+    })();
+    match result {
+        Ok(entries) => Ok((
+            entries,
+            imported.into_iter().map(|file| file.path).collect(),
+        )),
+        Err(mut error) => {
+            for file in imported.into_iter().rev() {
+                if let Some(sha256) = file.created_sha256
+                    && let Err(rollback) = remove_imported_file(&file.path, &sha256)
+                {
+                    error = format!(
+                        "{error}. Could not roll back {}: {rollback}",
+                        file.path.display()
+                    )
+                    .into();
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn remove_imported_file(path: &Path, sha256: &str) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    // Cleanup also runs after cancellation. Leave edits made by another
+    // program in place and report them with the original import error.
+    if !metadata.is_file() || fingerprint(path, &AtomicBool::new(false))? != sha256 {
+        return Err("The file changed after import".into());
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
 fn scan(kind: Kind, root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Result<Vec<Entry>> {
     if !fs::symlink_metadata(root)?.is_dir() {
         return Err(format!(
@@ -234,7 +280,18 @@ fn scan(kind: Kind, root: &Path, old: Vec<Entry>, cancelled: &AtomicBool) -> Res
     check(cancelled)?;
     Ok(files.into_values().collect())
 }
-fn import_file(kind: Kind, root: &Path, source: &Path, cancelled: &AtomicBool) -> Result<PathBuf> {
+struct ImportedFile {
+    path: PathBuf,
+    /// Present only when this import created the destination.
+    created_sha256: Option<String>,
+}
+
+fn import_file(
+    kind: Kind,
+    root: &Path,
+    source: &Path,
+    cancelled: &AtomicBool,
+) -> Result<ImportedFile> {
     if !fs::symlink_metadata(root)?.is_dir() || !fs::symlink_metadata(source)?.is_file() {
         return Err(format!("Select a regular {} file and directory", kind.noun).into());
     }
@@ -258,11 +315,19 @@ fn import_file(kind: Kind, root: &Path, source: &Path, cancelled: &AtomicBool) -
             if metadata.is_file()
                 && fingerprint(&target, cancelled).is_ok_and(|existing| existing == hash)
             {
-                return Ok(target);
+                return Ok(ImportedFile {
+                    path: target,
+                    created_sha256: None,
+                });
             }
         } else {
             match staged.persist_noclobber(&target) {
-                Ok(_) => return Ok(target),
+                Ok(_) => {
+                    return Ok(ImportedFile {
+                        path: target,
+                        created_sha256: Some(hash),
+                    });
+                }
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                     staged = error.file;
                 }
@@ -287,15 +352,15 @@ mod tests {
         let source = directory.path().join("个人.sofa");
         fs::write(&source, b"first").unwrap();
         let cancelled = AtomicBool::new(false);
-        let first = import_file(SOFA, &root, &source, &cancelled).unwrap();
+        let first = import_file(SOFA, &root, &source, &cancelled).unwrap().path;
         assert_eq!(
             first,
-            import_file(SOFA, &root, &source, &cancelled).unwrap()
+            import_file(SOFA, &root, &source, &cancelled).unwrap().path
         );
         fs::write(&source, b"second").unwrap();
         assert_ne!(
             first,
-            import_file(SOFA, &root, &source, &cancelled).unwrap()
+            import_file(SOFA, &root, &source, &cancelled).unwrap().path
         );
         assert_eq!(fs::read(&first).unwrap(), b"first");
         let files = scan(SOFA, &root, Vec::new(), &cancelled).unwrap();
@@ -335,7 +400,7 @@ mod tests {
 
         let profile = directory.path().join("Sony MDR-MV1 ParametricEQ.txt");
         fs::write(&profile, b"Preamp: -4.1 dB").unwrap();
-        let imported = import_file(HPTF, &root, &profile, &cancelled).unwrap();
+        let imported = import_file(HPTF, &root, &profile, &cancelled).unwrap().path;
         assert_eq!(imported.extension().unwrap(), "txt");
         // A SOFA dropped into the profile folder is not a profile, and the
         // reverse holds too: neither folder silently adopts the other's files.
@@ -350,9 +415,37 @@ mod tests {
         // A second, differing profile of the same name takes the slug's suffix
         // rather than overwriting the first.
         fs::write(&profile, b"Preamp: -3.0 dB").unwrap();
-        let second = import_file(HPTF, &root, &profile, &cancelled).unwrap();
+        let second = import_file(HPTF, &root, &profile, &cancelled).unwrap().path;
         assert_ne!(imported, second);
         assert_eq!(fs::read(&imported).unwrap(), b"Preamp: -4.1 dB");
         assert_eq!(scan(HPTF, &root, Vec::new(), &cancelled).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_batch_removes_new_files_and_can_be_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("hptf");
+        fs::create_dir(&root).unwrap();
+        let existing = root.join("existing.txt");
+        let sources =
+            ["existing.txt", "left.txt", "right.txt"].map(|name| directory.path().join(name));
+        fs::write(&existing, b"Preamp: -2 dB").unwrap();
+        fs::copy(&existing, &sources[0]).unwrap();
+        fs::write(&sources[1], b"Preamp: -3 dB").unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        assert!(import_and_scan(HPTF, &root, Vec::new(), &sources, &cancelled).is_err());
+        assert_eq!(fs::read(&existing).unwrap(), b"Preamp: -2 dB");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+        fs::write(&sources[2], b"Preamp: -5 dB").unwrap();
+        let (entries, paths) =
+            import_and_scan(HPTF, &root, Vec::new(), &sources, &cancelled).unwrap();
+        assert_eq!(
+            paths,
+            [existing, root.join("left.txt"), root.join("right.txt")]
+        );
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(Entry::selectable));
     }
 }

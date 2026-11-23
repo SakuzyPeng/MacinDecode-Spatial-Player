@@ -581,22 +581,23 @@ impl SpatialOutputController {
 
     /// Put the settings back to the compensation the output last accepted.
     #[cfg(macinrender_output)]
-    fn restore_accepted_hptf(&mut self) {
+    fn restore_accepted_hptf(&mut self, rejected_right: Option<&str>) {
         // Put the knobs back with the profile: a rejected cascade is
         // rejected as a whole, and leaving a knob where it caused the
         // refusal would make the next sync try the same thing again.
         let previous = self.hptf_accepted.as_ref().map(|(request, _)| request);
         self.settings.hptf =
             previous.map_or_else(String::new, |request| request.settings.profile.clone());
-        // Ears and all: a pair is refused as a pair.
-        match previous {
-            Some(request) => {
-                self.settings.hptf_separate_ears = request.settings.right.is_some();
-                if let Some(right) = &request.settings.right {
-                    self.settings.hptf_right.clone_from(right);
-                }
-            }
-            None => self.settings.hptf_right.clear(),
+        let previous_right = previous.and_then(|request| request.settings.right.clone());
+        if previous.is_some() {
+            self.settings.hptf_separate_ears = previous_right.is_some();
+        }
+        if let Some(right) = previous_right {
+            self.settings.hptf_right = Some(right);
+        } else if rejected_right.is_some_and(|right| !right.is_empty()) {
+            // A failed remembered file would reject every attempt to enable
+            // separate ears. Let the next attempt start from the shared profile.
+            self.settings.hptf_right = None;
         }
         self.settings.hptf_auto_trim = previous.is_some_and(|request| request.settings.auto_trim);
         #[allow(
@@ -662,7 +663,7 @@ impl SpatialOutputController {
                     && self.settings.hptf() == wanted.settings
                     && self.settings.hptf_adjustment() == wanted.adjustment
                 {
-                    self.restore_accepted_hptf();
+                    self.restore_accepted_hptf(wanted.settings.right.as_deref());
                 }
                 // A newer desired setting may have arrived while this request ran.
                 self.sync_hptf();
@@ -962,7 +963,7 @@ mod tests {
         output.ensure_configured(&output_config(signature), reader);
         let wait_for = |output: &mut SpatialOutputController, ears: [&str; 2]| {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while output.active_hptf() != Some(ears) {
+            while output.settings_pending() || output.active_hptf() != Some(ears) {
                 output.poll();
                 assert!(
                     Instant::now() < deadline,
@@ -979,14 +980,14 @@ mod tests {
         );
         let mut settings = output.settings().clone();
         settings.hptf = shared.to_owned();
+        settings.hptf_right = Some(broken.to_owned());
         output.hot_settings(settings.clone());
         wait_for(&mut output, [shared; 2]);
 
-        // A broken right ear is refused with its pair, and the settings go
-        // back to the shared profile that is still running.
-        settings.hptf_separate_ears = true;
-        settings.hptf_right = broken.to_owned();
-        output.hot_settings(settings.clone());
+        // The remembered file disappears while both ears use the shared profile.
+        std::fs::remove_file(broken).unwrap();
+        settings.set_hptf_separate_ears(true);
+        output.hot_settings(settings);
         let deadline = Instant::now() + Duration::from_secs(5);
         while output.take_hptf_error().is_none() {
             output.poll();
@@ -997,7 +998,15 @@ mod tests {
         assert_eq!(output.settings().hptf, shared);
         assert_eq!(output.active_hptf(), Some([shared; 2]));
 
-        settings.hptf_right = right.to_owned();
+        let mut settings = output.settings().clone();
+        assert!(settings.hptf_right.is_none());
+        settings.set_hptf_separate_ears(true);
+        output.hot_settings(settings);
+        wait_for(&mut output, [shared; 2]);
+        assert!(output.settings().hptf_separate_ears);
+
+        let mut settings = output.settings().clone();
+        settings.hptf_right = Some(right.to_owned());
         output.hot_settings(settings);
         wait_for(&mut output, [shared, right]);
         let [left_ear, right_ear] = output.hptf_readout();

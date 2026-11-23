@@ -521,10 +521,9 @@ listening to.
 
 #### One profile per ear
 
-Tick **Separate ears** to give each ear its own profile — for example one measured on each side of
-your head. It starts with the profile both ears already had, so ticking it changes nothing you can
-hear. Two buttons then name the left and right ear's profile; pick one and the list below chooses for
-that ear, and **Turn off** leaves just that ear without a profile of its own.
+Tick **Separate ears** to give each ear its own profile. The first time, both ears start with the
+shared profile. Select an ear above the profile list to choose its file. **Turn off** clears the
+profile for the selected ear.
 
 Both curves are drawn, the left ear in orange and the right in green, and each ear is checked and read
 back on its own. Three things stay common to both ears: **Bass**, **Tilt** and the automatic trim.
@@ -532,9 +531,10 @@ The knobs are your preference rather than a difference between the two sides of 
 an ear without a profile still takes them; and the renderer trims both ears by the same amount, so
 one boosted ear never makes the two sides differ in level.
 
-The two profiles are applied together: if one of them cannot be read, neither changes, and the panel
-goes back to the pair that is still playing. Unticking the box returns both ears to the left ear's
-profile and keeps the right one's choice for next time.
+If a profile fails to load, the panel restores the pair that is still playing. Unticking the box
+returns both ears to the left ear's profile and remembers the right ear's choice, including
+**Turn off**. If re-enabling separate ears fails to load a remembered file, tick the box again to
+start from the shared profile.
 
 #### Checked band for band
 

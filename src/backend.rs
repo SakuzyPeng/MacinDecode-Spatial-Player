@@ -271,7 +271,7 @@ fn tuned_profile(
     adjustment: crate::hptf_profile::Adjustment,
 ) -> Result<macindecode_macinrender::HptfProfile, String> {
     let base = if path.is_empty() {
-        crate::hptf_profile::Profile::of_bands(0.0, Vec::new())
+        crate::hptf_profile::Profile::default()
     } else {
         let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         crate::hptf_profile::Profile::parse(&text)?
