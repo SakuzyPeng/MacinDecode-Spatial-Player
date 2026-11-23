@@ -216,20 +216,25 @@ mod tests {
 
     #[test]
     fn every_library_file_of_the_manifest_is_audited_in_link_order() {
-        let manifest = "file:/build/libmr_adm_audio.a\n\
+        // A target's files are told from its link names by being absolute,
+        // which on Windows takes a drive.
+        let root = if cfg!(windows) { "C:/build" } else { "/build" };
+        let manifest = format!(
+            "file:{root}/libmr_adm_audio.a\n\
             link:FLAC\n\
-            target:FLAC=/build/_deps/libFLAC.a;ogg;/build/_deps/libogg.a;-lm\n\
+            target:FLAC={root}/_deps/libFLAC.a;ogg;{root}/_deps/libogg.a;-lm\n\
             framework:CoreAudio\n\
             system:m\n\
             msvc-runtime:MultiThreaded\n\
-            feature:iamf\n";
+            feature:iamf\n"
+        );
         assert_eq!(
-            parse(manifest),
+            parse(&manifest),
             Manifest {
                 libraries: vec![
-                    PathBuf::from("/build/libmr_adm_audio.a"),
-                    PathBuf::from("/build/_deps/libFLAC.a"),
-                    PathBuf::from("/build/_deps/libogg.a"),
+                    PathBuf::from(format!("{root}/libmr_adm_audio.a")),
+                    PathBuf::from(format!("{root}/_deps/libFLAC.a")),
+                    PathBuf::from(format!("{root}/_deps/libogg.a")),
                 ],
                 msvc_runtime: Some("MultiThreaded".into()),
             }
