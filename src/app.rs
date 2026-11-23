@@ -1073,6 +1073,9 @@ impl PlayerApp {
         if head.status.confidence() == crate::head_tracking::Confidence::Tracking {
             context.request_repaint_after(Duration::from_millis(33));
         }
+        if self.output.room_switch_pending() {
+            context.request_repaint_after(Duration::from_millis(100));
+        }
         if let Some(result) = self.output.take_settings_result() {
             self.audio_settings_error = result.as_ref().err().cloned();
             self.status = match result {
@@ -1582,7 +1585,11 @@ impl PlayerApp {
             return;
         }
         self.audio_settings_error = None;
-        if previous.needs_rebuild(&settings)
+        let room_change_after_end = previous.room_selected()
+            && settings.room_selected()
+            && previous.room != settings.room
+            && self.output.snapshot().phase() == OutputPhase::Ended;
+        if (previous.needs_rebuild(&settings) || room_change_after_end)
             && self.output.is_configured_for_playback(
                 self.decoder.request_id(),
                 self.decoder.playback_epoch(),
@@ -1803,12 +1810,15 @@ impl PlayerApp {
         egui::Window::new("Audio settings")
             .open(&mut open)
             .resizable(false)
+            .vscroll(true)
             .default_width(390.0)
             .show(context, |ui| {
                 if let Some(error) = &self.audio_settings_error {
                     ui.colored_label(theme::WARNING, error);
                 }
-                if self.output.settings_pending() {
+                if self.output.room_switch_pending() && !self.playback_intent {
+                    ui.label("Room change pending. Resume playback to apply it.");
+                } else if self.output.settings_pending() {
                     ui.label("Preparing audio settings…");
                 }
                 ui.add_enabled_ui(
@@ -2726,6 +2736,15 @@ impl PlayerApp {
         decoder: &DecoderSnapshot,
         mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
     ) {
+        let room_view = self.room_view();
+        let rotated = if room_view.is_none() {
+            mirror_frame
+                .copied()
+                .map(|frame| frame.in_world_space(self.output.head_snapshot().pose))
+        } else {
+            None
+        };
+        let mirror_frame = rotated.as_ref().or(mirror_frame);
         let silent_objects = mirror_frame.and_then(|mirrored| {
             self.fade_silent_objects.then(|| {
                 self.object_meters
@@ -2773,6 +2792,7 @@ impl PlayerApp {
                         self.meter_readout,
                     ),
                     head_locked: object.tracking.head_locked(),
+                    screen_reference: object.screen_reference,
                     trail: mirrored.trail(slot),
                     trail_jumps: mirrored.trail_jumps(slot),
                     trail_loudness: if self.meter_readout == MeterReadout::Momentary {
@@ -2808,7 +2828,6 @@ impl PlayerApp {
         }
         let nameplates = &objects[..nameplate_count];
         let objects = &objects[..object_count];
-        let room_view = self.room_view();
         frame.show(ui, |ui| {
             ui.set_min_height(content_height);
             // The stage claims drag and scroll itself so the camera never fights
@@ -3770,11 +3789,7 @@ impl eframe::App for PlayerApp {
         // the audio side for three separate snapshots — and the ballistics
         // advance once, which they must, because a second call would charge the
         // same wall time to the meters twice.
-        let mirror_frame = self
-            .output
-            .scene_view()
-            .read(self.decoder.playback_key())
-            .map(|frame| frame.in_world_space(self.output.head_snapshot().pose));
+        let mirror_frame = self.output.scene_view().read(self.decoder.playback_key());
         if let Some(mirrored) = mirror_frame.as_ref() {
             let sample_rate = self
                 .decoder
@@ -4343,7 +4358,11 @@ fn nameplate_anchor(
     match object.lfe_slot {
         Some(_) if room.is_some() => None,
         Some((index, count)) => Some(scene3d::scene::lfe_destination_position(index, count)),
-        None => Some(scene3d::scene::object_position(object.position, room)),
+        None => Some(scene3d::scene::object_position(
+            object,
+            object.position,
+            room,
+        )),
     }
 }
 

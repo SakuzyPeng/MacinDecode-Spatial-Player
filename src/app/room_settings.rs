@@ -63,10 +63,13 @@ impl PlayerApp {
             self.room_geometry = None;
         }
         let mut settings = self.output.settings().clone();
-        path.clone_into(match package {
-            RoomPackage::Room => &mut settings.room,
-            RoomPackage::Hrir => &mut settings.room_hrir,
-        });
+        match package {
+            RoomPackage::Room => {
+                path.clone_into(&mut settings.room);
+                settings.binaural_renderer = BinauralRenderer::Room;
+            }
+            RoomPackage::Hrir => path.clone_into(&mut settings.room_hrir),
+        }
         self.change_output_settings(settings, context);
     }
 
@@ -77,6 +80,7 @@ impl PlayerApp {
         settings: &mut OutputSettings,
         context: &egui::Context,
     ) {
+        let previous = settings.binaural_renderer;
         ui.horizontal(|ui| {
             ui.label("Binaural renderer");
             egui::ComboBox::from_id_salt("binaural-renderer")
@@ -91,6 +95,13 @@ impl PlayerApp {
                     }
                 });
         });
+        if previous != BinauralRenderer::Room
+            && settings.binaural_renderer == BinauralRenderer::Room
+            && settings.room.is_empty()
+        {
+            self.pick_room_package(RoomPackage::Room, "", context);
+            settings.binaural_renderer = previous;
+        }
         match settings.binaural_renderer {
             BinauralRenderer::SafHrtf => self.draw_hrtf_page(ui, settings, context),
             BinauralRenderer::Room => self.draw_room_controls(ui, settings, context),
@@ -275,11 +286,14 @@ impl PlayerApp {
     /// selected to form the headphone feed, its package reads, and the room
     /// view is switched on.
     pub(super) fn room_view(&mut self) -> Option<RoomView> {
-        room_view_of(
-            self.output.settings(),
-            self.room_view_enabled,
-            &mut self.room_geometry,
-        )
+        let settings = self.output.settings();
+        let room = room_view_of(settings, self.room_view_enabled, &mut self.room_geometry)?;
+        let initial_room = self.output.initial_room();
+        Some(room.with_placement(
+            initial_room.as_deref(),
+            self.output.head_snapshot().pose,
+            settings.room_screen.mapping(),
+        ))
     }
 
     /// What the chosen room is, held against the listening-room geometry
@@ -744,7 +758,7 @@ mod tests {
         let view = room_view_of(&room, true, &mut slot).expect("a room to draw");
         // Built at the settings' own scene unit: overhead meets the ceiling.
         let k = crate::scene3d::params::ROOM_WIDTH / 7.0;
-        assert!((view.place([0.0, 1.0, 0.0])[1] - 1.85 * k).abs() < 1e-5);
+        assert!((view.place([0.0, 1.0, 0.0], false, false)[1] - 1.85 * k).abs() < 1e-5);
 
         assert!(room_view_of(&room, false, &mut slot).is_none());
         let saf = OutputSettings {

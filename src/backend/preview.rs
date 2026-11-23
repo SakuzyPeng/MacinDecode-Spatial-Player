@@ -357,6 +357,7 @@ impl ScenePreview {
                     position,
                     gain,
                     tracking: state.map_or_default(crate::decoder::SpatialObjectState::tracking),
+                    screen_reference: false,
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                     energy: energy.get(slot).copied().unwrap_or_default(),
                 })

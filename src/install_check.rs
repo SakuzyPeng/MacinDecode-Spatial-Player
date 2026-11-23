@@ -169,6 +169,7 @@ fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
                     7,
                     ObjectState {
                         head_locked: false,
+                        screen_reference: None,
                         active: true,
                         gain: 1.0,
                         position: Some([0.0, 1.0, 0.0]),
@@ -181,6 +182,7 @@ fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
                         gain: 1.0,
                         position: None,
                         head_locked: false,
+                        screen_reference: None,
                     },
                 ),
             ],

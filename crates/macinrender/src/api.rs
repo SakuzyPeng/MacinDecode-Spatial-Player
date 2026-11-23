@@ -81,6 +81,7 @@ api! {
     adm_monitor_output_devices_json(*mut c_void, *mut *mut c_char) -> i32;
     adm_room_load(*mut c_void, *const c_char, *mut *mut c_void) -> i32;
     adm_room_destroy(*mut c_void) -> ();
+    adm_room_manifest_json(*const c_void) -> *const c_char;
     adm_create_scene_stream_with_room_quality(
         *mut c_void,
         *const raw::StreamConfig,

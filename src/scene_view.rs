@@ -136,6 +136,7 @@ pub struct ObjectView {
     pub position: [f32; 3],
     pub gain: f32,
     pub tracking: ContentHeadTracking,
+    pub screen_reference: bool,
     /// Whether an instant (`ramp_frames == 0`) metadata update landed for this
     /// element inside the quantum being published. The mirror latches it until
     /// the next breadcrumb, because quanta are far shorter than the sampling
@@ -232,7 +233,7 @@ impl SceneViewFrame {
     }
 
     /// Keep stored trails in their declared reference frame. Rendering the
-    /// room uses the current forward head rotation for head-relative objects.
+    /// panner uses the current forward head rotation for head-relative objects.
     pub fn in_world_space(mut self, pose: crate::head_tracking::Quaternion) -> Self {
         for slot in 0..self.total_objects.min(MAX_VIEW_OBJECTS) {
             if self.objects[slot].tracking.head_locked() {
@@ -510,12 +511,15 @@ impl SceneViewMirror {
         // element set changed, a slot can now hold a different object and its
         // history is not that object's.
         for (slot, previous) in frame.objects.iter().enumerate() {
-            if previous.element_id != staged[slot].element_id
-                || previous.tracking.head_locked() != staged[slot].tracking.head_locked()
+            let reference_frame_changed = previous.element_id != staged[slot].element_id
+                || previous.tracking.head_locked() != staged[slot].tracking.head_locked();
+            if reference_frame_changed {
+                frame.loudness_lens[slot] = 0;
+            }
+            if reference_frame_changed || previous.screen_reference != staged[slot].screen_reference
             {
                 frame.trail_lens[slot] = 0;
                 frame.pending_jump[slot] = false;
-                frame.loudness_lens[slot] = 0;
             }
         }
 
@@ -977,6 +981,7 @@ mod tests {
             position: [x, 0.0, 0.0],
             gain: 1.0,
             tracking: ContentHeadTracking::Unspecified,
+            screen_reference: false,
             jumped: false,
             energy: ObjectEnergy::default(),
         }

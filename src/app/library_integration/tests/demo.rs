@@ -232,3 +232,34 @@ fn demo_stop_preserves_saved_file_cursor() {
     );
     assert_eq!(restored.checkpoint.frame, 480_000);
 }
+
+#[cfg(macinrender_output)]
+#[test]
+fn the_first_room_package_switches_a_running_demo_from_saf_to_room() {
+    use crate::app::room_settings::{RoomPackage, RoomPicker};
+    use crate::backend::BinauralRenderer;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(directory.path());
+    settle(&mut app, &context);
+    start_demo(&mut app, &context);
+    assert!(app.output.settings().room.is_empty());
+    let manifest =
+        Path::new(env!("MACINRENDER_CORE_SOURCE")).join("tests/fixtures/room/synthetic/room.json");
+    let picked = manifest.clone();
+    app.room_picker = Some(RoomPicker {
+        package: RoomPackage::Room,
+        future: Box::pin(async move { Some(picked) }),
+    });
+    until(&mut app, &context, |app| {
+        app.output.settings().binaural_renderer == BinauralRenderer::Room
+            && app.output.snapshot().is_playing()
+            && app.output.initial_room().is_some()
+    });
+    assert!(
+        app.audio_settings_error.is_none(),
+        "{:?}",
+        app.audio_settings_error
+    );
+    assert_eq!(app.output.settings().room, manifest.to_str().unwrap());
+}

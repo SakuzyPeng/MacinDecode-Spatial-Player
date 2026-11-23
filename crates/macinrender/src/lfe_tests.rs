@@ -99,6 +99,7 @@ fn triple_balance_plays_objects_with_an_lfe_only_bed() {
                         gain: 1.0,
                         position: (element == 7).then_some([0.0, 1.0, 0.0]),
                         head_locked: false,
+                        screen_reference: None,
                     },
                 )
             })
@@ -220,6 +221,7 @@ fn check_renderer_lfe_output(
         gain: 1.0,
         position: None,
         head_locked: false,
+        screen_reference: None,
     };
     assert!(
         session

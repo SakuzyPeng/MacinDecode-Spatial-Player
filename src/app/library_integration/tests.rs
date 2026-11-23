@@ -976,6 +976,81 @@ fn screen_edits_reach_the_settings_only_when_applied_and_valid() {
     assert_eq!(settings.room_screen, draft);
 }
 
+#[cfg(macinrender_output)]
+#[test]
+fn the_room_settings_can_scroll_to_apply_at_the_default_window_size() {
+    use crate::backend::{BinauralRenderer, SpatialBackendKind};
+
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(directory.path());
+    settle(&mut app, &context);
+    crate::theme::install(&context);
+    let mut settings = app.output.settings().clone();
+    settings.mode = SpatialBackendKind::SafBinaural;
+    settings.binaural_renderer = BinauralRenderer::Room;
+    settings.room = Path::new(env!("MACINRENDER_CORE_SOURCE"))
+        .join("tests/fixtures/room/synthetic/room.json")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut draft = settings.room_screen;
+    draft.reference_custom = true;
+    draft.reproduction_enabled = true;
+    draft.reproduction.width = 90.0;
+    app.room_screen_draft = Some(draft);
+    app.output.install_settings(settings);
+    app.output_page = crate::app::OutputPage::Hrtf;
+    app.output_settings_open = true;
+
+    let visible = |output: &egui::FullOutput, label: &str| {
+        painted_text(output)
+            .into_iter()
+            .find(|(text, rect, clip)| text.starts_with(label) && clip.contains(rect.center()))
+            .map(|(_, rect, _)| rect.center())
+    };
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.2, vec![]);
+    let pointer = visible(&output, "Room geometry")
+        .or_else(|| visible(&output, "Binaural renderer"))
+        .unwrap();
+    let scroll = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -550.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            },
+        ]
+    };
+    let mut time = 0.3;
+    let screen = loop {
+        let _ = ui_frame(&mut app, &context, time, scroll(pointer));
+        time += 0.2;
+        let frame = ui_frame(&mut app, &context, time, vec![]);
+        if let Some(pos) = visible(&frame, "Screen mapping") {
+            break pos;
+        }
+        time += 0.1;
+        assert!(time < 4.0);
+    };
+    click_widget(&mut app, &context, screen, time + 0.1);
+    time += 0.3;
+    let apply = loop {
+        let _ = ui_frame(&mut app, &context, time, scroll(screen));
+        time += 0.2;
+        let frame = ui_frame(&mut app, &context, time, vec![]);
+        if let Some(pos) = visible(&frame, "Apply") {
+            break pos;
+        }
+        time += 0.1;
+        assert!(time < 8.0);
+    };
+    click_widget(&mut app, &context, apply, time + 0.1);
+    assert_eq!(app.output.settings().room_screen, draft);
+}
+
 #[test]
 fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
     use crate::backend::{OutputSettings, RoomScale};
@@ -1160,7 +1235,7 @@ fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
     };
     assert_eq!(
         crate::app::nameplate_anchor(&object, Some(&room)),
-        Some(room.place(object.position))
+        Some(room.place(object.position, object.head_locked, object.screen_reference))
     );
     assert_eq!(
         crate::app::nameplate_anchor(&object, None),

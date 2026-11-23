@@ -152,6 +152,7 @@ impl SpatialOutputController {
         #[cfg(macinrender_output)]
         if self.runtime.is_some()
             && self.settings.mode.resolved() == SpatialBackendKind::SafBinaural
+            && !self.settings.room_selected()
             && !self.settings.sofa.is_empty()
             && matches!(
                 self.snapshot.phase,
@@ -410,6 +411,33 @@ impl SpatialOutputController {
             false
         }
     }
+    #[cfg_attr(not(macinrender_output), allow(clippy::unused_self))]
+    pub fn initial_room(&self) -> Option<std::sync::Arc<crate::room_package::RoomGeometry>> {
+        #[cfg(macinrender_output)]
+        if let Some(runtime) = &self.runtime {
+            return runtime.initial_room();
+        }
+        None
+    }
+
+    #[cfg_attr(not(macinrender_output), allow(clippy::unused_self))]
+    pub fn room_switch_pending(&self) -> bool {
+        #[cfg(macinrender_output)]
+        if let Some(settings) = &self.pending_hot {
+            return settings.room_selected() && self.settings.room != settings.room;
+        }
+        false
+    }
+
+    #[cfg(macinrender_output)]
+    fn cancel_pending_switch(&mut self) {
+        if self.pending_hot.take().is_some() {
+            self.update_result = Some(Err(
+                "The output changed before applying the renderer settings".into(),
+            ));
+        }
+    }
+
     fn configure_head(&self) {
         #[cfg(posebridge_input)]
         self.head.configure_bridge(&self.settings.posebridge);
@@ -456,6 +484,7 @@ impl SpatialOutputController {
             #[cfg(target_os = "macos")]
             self.atmos.reset();
             self.legacy.reset();
+            self.cancel_pending_switch();
             self.runtime = None;
             self.hptf_accepted = None;
             self.hptf_pending = None;
@@ -540,6 +569,7 @@ impl SpatialOutputController {
             .and_then(super::macinrender::Runtime::take_reset_failure)
             && self.config.as_ref() == Some(&config)
         {
+            self.cancel_pending_switch();
             self.runtime = None;
             self.config = None;
             self.ensure_configured(&config, reader);
@@ -561,14 +591,14 @@ impl SpatialOutputController {
                     Err(error) => self.pcm_error = Some(error),
                 }
             }
-            if let Some(result) = self
-                .runtime
-                .as_ref()
-                .and_then(super::macinrender::Runtime::take_switch_result)
+            if self.pending_hot.is_some()
+                && let Some(result) = self
+                    .runtime
+                    .as_ref()
+                    .and_then(super::macinrender::Runtime::take_switch_result)
+                && let Some(settings) = self.pending_hot.take()
             {
-                if let Some(settings) = self.pending_hot.take()
-                    && result.is_ok()
-                {
+                if result.is_ok() {
                     self.install_settings(settings);
                 }
                 self.update_result = Some(result);
@@ -1294,6 +1324,107 @@ mod tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[cfg(macinrender_output)]
+    #[test]
+    fn a_paused_room_stays_selected_after_a_failed_or_cancelled_switch() {
+        let fixtures =
+            std::path::Path::new(env!("MACINRENDER_CORE_SOURCE")).join("tests/fixtures/room");
+        let room =
+            |directory: &std::path::Path| directory.join("room.json").to_str().unwrap().to_owned();
+        let initial = OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            binaural_renderer: super::super::BinauralRenderer::Room,
+            room: room(&fixtures.join("synthetic")),
+            ..Default::default()
+        };
+        let copy = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(fixtures.join("synthetic")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), copy.path().join(entry.file_name())).unwrap();
+        }
+        let key = PlaybackKey::new(41, 1);
+        let (_queue, reader) = scene_queue_pair(key);
+        let config = output_config(SceneSignature::from_block(&tone(0)));
+        let mut output = SpatialOutputController::new();
+        output.install_settings(initial.clone());
+        output.ensure_configured(&config, reader);
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let wait = |output: &mut SpatialOutputController| {
+            output.poll();
+            assert_ne!(
+                output.snapshot().phase(),
+                OutputPhase::Failed,
+                "{:?}",
+                output.snapshot()
+            );
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        };
+        while output.snapshot().phase() != OutputPhase::Ready {
+            wait(&mut output);
+        }
+        output.hot_settings(OutputSettings {
+            room: room(&fixtures.join("synthetic-96k")),
+            ..initial.clone()
+        });
+        loop {
+            wait(&mut output);
+            assert_eq!(output.settings(), &initial);
+            if let Some(result) = output.take_settings_result() {
+                assert!(result.unwrap_err().contains("采样率"));
+                break;
+            }
+        }
+
+        output.hot_settings(OutputSettings {
+            room: room(copy.path()),
+            ..initial.clone()
+        });
+        let slot = output.runtime.as_ref().unwrap().control_slot();
+        loop {
+            wait(&mut output);
+            let status = slot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .try_room_status()
+                .unwrap()
+                .unwrap();
+            if status.requested_revision >= 2 {
+                assert_eq!(status.applied_revision, 0);
+                break;
+            }
+        }
+        assert!(output.room_switch_pending());
+        assert_eq!(output.take_settings_result(), None);
+        assert_eq!(output.settings(), &initial);
+
+        let other_key = PlaybackKey::new(41, 2);
+        let (_other_queue, reader) = scene_queue_pair(other_key);
+        let next = OutputStreamConfig::new(
+            41,
+            2,
+            48_000,
+            48_000,
+            SceneSignature::from_block(&tone(0)),
+            OutputDeviceSelection::SystemDefault,
+        )
+        .unwrap();
+        output.ensure_configured(&next, reader);
+        loop {
+            wait(&mut output);
+            assert_eq!(output.settings(), &initial);
+            if let Some(result) = output.take_settings_result() {
+                assert!(result.unwrap_err().contains("Playback changed"));
+                break;
+            }
+        }
+        assert!(!output.settings_pending());
     }
 
     #[test]

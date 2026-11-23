@@ -14,6 +14,7 @@ mod macinrender;
 mod screen;
 mod settings;
 pub use controller::SpatialOutputController;
+pub(crate) use screen::ScreenMapping;
 pub use screen::{ScreenCoordinates, ScreenGeometry, ScreenSettings};
 pub use settings::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,

@@ -22,11 +22,12 @@ mod tracking;
 mod worker;
 pub use tracking::{ContentHeadTracking, TrackingIssue, TrackingSummary};
 
-// Player metadata mask. These four retained bits have the same values as Core's
+// Player metadata mask. These retained bits have the same values as Core's
 // published fields; neither the renderer nor the native crate depends on Core.
 pub const FIELD_ACTIVE: u32 = 1;
 pub const FIELD_GAIN: u32 = 1 << 1;
 pub const FIELD_POSITION: u32 = 1 << 3;
+pub const FIELD_SCREEN_FACTOR: u32 = 1 << 6;
 pub const FIELD_HEAD_TRACKING: u32 = 1 << 12;
 
 pub const PREBUFFER_MILLISECONDS: u64 = 300;
@@ -433,6 +434,7 @@ pub struct SpatialObjectState {
     linear_gain: Option<f32>,
     semantic_complete: bool,
     tracking: ContentHeadTracking,
+    screen_reference: bool,
 }
 
 impl SpatialObjectState {
@@ -448,6 +450,7 @@ impl SpatialObjectState {
             linear_gain,
             semantic_complete,
             tracking: ContentHeadTracking::Unspecified,
+            screen_reference: false,
         }
     }
 
@@ -474,6 +477,15 @@ impl SpatialObjectState {
 
     pub const fn tracking(self) -> ContentHeadTracking {
         self.tracking
+    }
+
+    pub(super) const fn with_screen_reference(mut self, referenced: bool) -> Self {
+        self.screen_reference = referenced;
+        self
+    }
+
+    pub const fn screen_reference(self) -> bool {
+        self.screen_reference
     }
 }
 

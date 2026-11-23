@@ -6,7 +6,7 @@ use super::SceneLfePcm;
 use super::SceneObjectPcm;
 use super::{
     DecodedSceneBlock, FIELD_ACTIVE, FIELD_GAIN, FIELD_HEAD_TRACKING, FIELD_POSITION,
-    SceneMetadataUpdate, SpatialObjectState, SpatialPosition,
+    FIELD_SCREEN_FACTOR, SceneMetadataUpdate, SpatialObjectState, SpatialPosition,
 };
 
 #[cfg(any(feature = "decode", test))]
@@ -116,7 +116,8 @@ impl SceneContinuity {
                 previous.current.linear_gain(),
                 raw.semantic_complete(),
             )
-            .with_tracking(raw.tracking()),
+            .with_tracking(raw.tracking())
+            .with_screen_reference(raw.screen_reference()),
         );
         let target = SpatialObjectState::new(
             raw.metadata_active(),
@@ -124,7 +125,8 @@ impl SceneContinuity {
             previous.target.linear_gain(),
             raw.semantic_complete(),
         )
-        .with_tracking(raw.tracking());
+        .with_tracking(raw.tracking())
+        .with_screen_reference(raw.screen_reference());
         for (field, remaining) in [FIELD_POSITION, FIELD_GAIN]
             .into_iter()
             .zip(previous.remaining)
@@ -183,7 +185,8 @@ impl StateTimeline {
                     && position.is_none_or(SpatialObjectState::semantic_complete)
                     && gain.is_none_or(SpatialObjectState::semantic_complete),
             )
-            .with_tracking(state.tracking()),
+            .with_tracking(state.tracking())
+            .with_screen_reference(state.screen_reference()),
         )
     }
 
@@ -232,6 +235,11 @@ impl StateTimeline {
                 target.tracking()
             } else {
                 base.tracking()
+            })
+            .with_screen_reference(if fields & FIELD_SCREEN_FACTOR != 0 {
+                target.screen_reference()
+            } else {
+                base.screen_reference()
             }),
         );
     }
@@ -355,6 +363,7 @@ pub(crate) fn interpolate_state(
         from.semantic_complete() && to.semantic_complete(),
     )
     .with_tracking(to.tracking())
+    .with_screen_reference(to.screen_reference())
 }
 
 fn lerp(from: f32, to: f32, amount: f32) -> f32 {

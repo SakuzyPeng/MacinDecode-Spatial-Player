@@ -23,7 +23,7 @@ Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增�
   SAF 的等功率模式由播放器按块生成两路目的 PCM，Core 使用 Direct，避免再次合成或复制。单路源补齐一个不与源 ID 冲突的输出 LFE ID，不进入源场景和电平表。
   检测在增益/静音之后按音频块执行（阈值 `1e-12`），不在逐采样过零点改变增益。Windows 对象直通只有一个 LFE 槽位：单路有信号时原电平通过，两路都有信号时按 `(LFE1 + LFE2) / sqrt(2)` 合成。
   更换 LFE 路由会准备新的输出并沿用当前播放位置，避免已排队 PCM 跨越两种归一化策略。
-- 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA；渲染器另可选 Room（目前只有界面，见[房间双耳](#房间双耳仅界面)）。
+- 软件双耳：SAF HRTF，默认内置 KEMAR，可选择用户 SOFA；渲染器另可选 [Room](#房间双耳)。
 - 系统模式跟随系统默认输出。Windows 的固定床超出静态槽位的位置采用所选后端的几何；
   静态槽位的最终角度由 Windows 的空间化器决定。
 - 软件朝向在 Mac 优先使用 AirPods，缺失或权限不可用时使用手动朝向；Windows 使用手动朝向。
@@ -62,7 +62,7 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 软件双耳的 `HRTF` 页顶部是 `Binaural renderer`：SAF HRTF（默认）或 Room，与系统空间音频的
 `Speaker renderer` 同构——两者向同一个立体声设备写同样的两声道，所以是模式内的选择而不是新模式，
 设备、头追和 `Headphones` 页沿用软件双耳。偏好字段为 `binaural_renderer`（`saf-hrtf` / `room`），
-旧设置缺省为 SAF HRTF。Room 另存 `room`（房间包清单）、`room_hrir`（个人 HRIR 包清单，空为房间包
+旧设置缺省为 SAF HRTF。首次选择 Room 会打开文件选择器，播放器在选定房间包后才提交渲染器和路径。Room 另存 `room`（房间包清单）、`room_hrir`（个人 HRIR 包清单，空为房间包
 默认绑定）、`room_scale`（`automatic` / `fixed`，缺省自动）和 `room_metres_per_unit`（固定比例的值，
 0.01–100，默认 1.5；加载时钳入范围，非有限值回到默认；自动时保留，改回固定即恢复），对应上游
 C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也是上游默认），以听者为原点，
@@ -74,7 +74,7 @@ C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也
 
 房间信息卡（`room_package.rs`）只读 `mradm.room` v1 清单的明文几何字段（`dimensions`、`listener`、
 `reference_distance`、`minimum_distance`、`boundary_clearance`），按路径缓存，重新选择同一房间包即重读；
-清单上限 1 MiB，坐标沿用渲染器的 x 前后、y 左右、z 上。判定只覆盖 BS.1116-3 / EBU Tech 3276 的几何
+清单上限 1 MiB，房间各边沿用 Core 的 1–50 m 范围，坐标为 x 前后、y 左右、z 上。判定只覆盖 BS.1116-3 / EBU Tech 3276 的几何
 建议（面积、比例、整数比、左右对称），名义 Tm 只作为目标值显示。衰减和早反射属于上游
 `check-acoustics.py` 对滤波器的测量，播放器不读取、不推算也不声明。到墙距离按上游的射线约束和
 `boundary_clearance` 计算各仰角最坏方位的最大半径；单位距离电平差为
@@ -102,8 +102,8 @@ C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也
 - **只画实际位置。** `RoomView::place` 逐项转写上游 `mradm-dsp` 的 `room::geometry::position`：固定比例按
   Scene unit 缩放整个向量，自动比例按 `room_offset` 逐轴缩放到该方向的墙；之后都至少保持 `minimum_distance`，
   沿自身射线停在第一面墙的 `boundary_clearance` 之内。
-  headLocked 走同一规则（上游用会话创建时的房间）。Scene 要求的位置不画，免得每个对象都要分辨两个方块。
-  听者正中的声源没有方向，上游沿用上一个方向，单帧无从得知，按上游的初始方向放在正前方。
+  屏幕参考对象也应用极坐标边缘变换。头部锁定对象先按会话创建时的房间在头部坐标系里完成放置，再随头部转到画面中。
+  位于听者正中的声源按初始方向放在正前方。
 - **LFE 不画。** 房间渲染里 LFE 走公共核，没有位置。
 - **切开的墙。** 朝向相机的面（内法线与指向眼睛的方向点积不大于零）只画棱，其余面画全。
 - **装修只读吸声系数。** 墙面按 0.6 m 间距排竖向模块，每块宽度为该面 8 个频带的平均吸声系数乘以间距；
@@ -127,9 +127,11 @@ C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也
 标准 58°／1.78）。`ScreenGeometry::edges` 逐项转写上游 `mradm-dsp` 的 `room::screen::edges`，
 供界面在提交前拒绝渲染器不接受的几何；最终判断仍在渲染器。存储中被拒的几何在加载时回到标准屏幕。
 界面以草稿编辑、Apply 一次提交，因为屏幕随会话固定，每次提交都会准备新输出。
+AC-4 Scene 的 `screen_factor` 按 Core 的 ADM 导出规则转换成 `screenRef`。房间流保留初始标记及其变化，
+包括 seek 裁剪后的首帧。
 
-`needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR、比例或屏幕需要新会话；只换房间不重建，留给
-`adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
+切换渲染器、HRIR、比例或屏幕需要新会话。播放中只换房间时，运行中的会话通过
+`adm_scene_stream_switch_room` 后台准备并交叉淡化。
 
 ### 播放
 
@@ -144,11 +146,10 @@ C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也
 - **只接受 48 kHz 节目。** 房间按房间包的采样率渲染、不做重采样（44.1 kHz 输入会被渲染器拒绝），输出流固定
   48 kHz，所以 `validate_source` 在 Room 下对其他采样率直接给出可读的错误，建议改用 SAF HRTF。
   96 kHz 房间包同样被渲染器拒绝。
-- **运行中换房。** 只改房间包时 `needs_rebuild` 为假，`hot_settings` 经 `Runtime::switch` 交给
-  `Control::switch_renderer`，后者对房间会话改走 `adm_scene_stream_switch_room`。包的载入是同步的，缺失或
-  损坏的包当场报错（错误里带路径），正在播放的房间不受影响。输出在渲染时，等到 room status 的
-  `applied_revision` 追上本次请求才返回，失败取其 `message`；暂停时渲染器要等恢复播放才接手请求
-  （状态停在 `preparing`），所以请求被接受即返回。切换必须保持会话创建时的 HRIR、比例和屏幕，否则渲染器拒绝。
+- **运行中换房。** 读取房间包和校验组件在独立线程和独立 C ABI context 中进行。音频生产线程接收
+  已验证的包，向当前播放 epoch 提交请求。播放器在 `applied_revision` 确认后保存新路径并更新房间视图，
+  暂停时仍可显示准备失败。跳转或节目结束取消尚未生效的请求时，界面报告取消并保留已应用的设置。
+  Core 在跳转时保留已经开始交叉淡化的房间，播放器也会接受该应用版本。换房沿用会话创建时的 HRIR、比例和屏幕。
 - **会话复用。** `replace_source` 换曲时比较会话固定的部分（`room_session`：去掉清单后的 `RoomSettings`），
   房间包本身跟随 `switch`，与 SOFA 相同。
 - **尾声。** 房间的混响在节目结束后继续播放，`presented` 会超过节目长度（合成房间约 4441 帧），播放头仍封顶在

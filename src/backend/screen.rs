@@ -56,6 +56,55 @@ pub struct ScreenEdges {
     pub top: f64,
 }
 
+/// The same polar-edge transform Core applies, in listener coordinates
+/// (+X right, +Y up, −Z front), with the input radius preserved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ScreenMapping {
+    reference: ScreenEdges,
+    reproduction: ScreenEdges,
+}
+
+impl ScreenMapping {
+    pub(crate) fn position(&self, [x, y, z]: [f64; 3]) -> [f64; 3] {
+        let radius = norm([x, y, z]);
+        if radius <= 1e-15 {
+            return [x, y, z];
+        }
+        let ScreenEdges {
+            right,
+            left,
+            bottom,
+            top,
+        } = self.reference;
+        let destination = self.reproduction;
+        let azimuth = warp(
+            (-x).atan2(-z).to_degrees(),
+            [-180.0, right, left, 180.0],
+            [-180.0, destination.right, destination.left, 180.0],
+        );
+        let elevation = warp(
+            y.atan2(x.hypot(z)).to_degrees(),
+            [-90.0, bottom, top, 90.0],
+            [-90.0, destination.bottom, destination.top, 90.0],
+        );
+        let (sa, ca) = azimuth.to_radians().sin_cos();
+        let (se, ce) = elevation.to_radians().sin_cos();
+        [-sa * ce * radius, se * radius, -ca * ce * radius]
+    }
+}
+
+fn warp(value: f64, reference: [f64; 4], reproduction: [f64; 4]) -> f64 {
+    let segment = if value <= reference[1] {
+        0
+    } else if value <= reference[2] {
+        1
+    } else {
+        2
+    };
+    let fraction = (value - reference[segment]) / (reference[segment + 1] - reference[segment]);
+    reproduction[segment] + (reproduction[segment + 1] - reproduction[segment]) * fraction
+}
+
 fn norm(v: [f64; 3]) -> f64 {
     v[0].hypot(v[1]).hypot(v[2])
 }
@@ -209,8 +258,21 @@ impl ScreenSettings {
     /// Whether the renderer would move anything: a reproduction screen must
     /// be given, and must differ from the reference it maps from.
     pub fn maps(&self) -> bool {
-        self.reproduction_enabled && self.reproduction.edges() != self.reference().edges()
+        self.mapping().is_some()
     }
+
+    pub(crate) fn mapping(&self) -> Option<ScreenMapping> {
+        if !self.reproduction_enabled {
+            return None;
+        }
+        let reference = self.reference().edges().ok()?;
+        let reproduction = self.reproduction.edges().ok()?;
+        (reference != reproduction).then_some(ScreenMapping {
+            reference,
+            reproduction,
+        })
+    }
+
     pub fn reference(&self) -> ScreenGeometry {
         if self.reference_custom {
             self.reference

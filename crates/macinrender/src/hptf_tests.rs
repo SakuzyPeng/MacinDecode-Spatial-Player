@@ -80,7 +80,8 @@ fn slow_profile_io_leaves_submission_and_output_controls_live() {
                             active: true,
                             gain: 1.0,
                             position: Some([0.0, 1.0, 0.0]),
-                            head_locked: false
+                            head_locked: false,
+                            screen_reference: None,
                         }
                     )],
                     updates: &[],

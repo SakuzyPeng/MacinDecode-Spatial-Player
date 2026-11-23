@@ -240,6 +240,7 @@ impl SceneRenderSource {
                     position: object.audio.position,
                     gain: object.audio.gain,
                     tracking: object.tracking,
+                    screen_reference: false,
                     jumped: jumped.get(slot).copied().unwrap_or(false),
                     energy: energy.get(slot).copied().unwrap_or_default(),
                 }),

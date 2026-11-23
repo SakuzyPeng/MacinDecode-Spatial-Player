@@ -181,8 +181,14 @@ impl RoomGeometry {
             ));
         }
         let finite = |values: &[f64]| values.iter().all(|value| value.is_finite());
-        if !finite(&manifest.dimensions) || manifest.dimensions.iter().any(|side| *side <= 0.0) {
-            return Err("The room's dimensions must be positive".into());
+        // Match Core's room dimensions so a manifest cannot produce more
+        // tiles or floor lines than the renderer's largest supported room.
+        if manifest
+            .dimensions
+            .iter()
+            .any(|side| !(1.0..=50.0).contains(side))
+        {
+            return Err("Room dimensions must each be between 1 and 50 m".into());
         }
         if !finite(&[
             manifest.reference_distance,
@@ -539,5 +545,17 @@ mod tests {
         );
         std::fs::write(&path, padded).unwrap();
         assert!(RoomGeometry::read(&path).unwrap_err().contains("too large"));
+    }
+
+    #[test]
+    fn dimensions_outside_the_renderer_range_cannot_reach_the_preview() {
+        for dimensions in ["[51.0, 6.0, 3.2]", "[7.0, 6000.0, 3.2]", "[7.0, 6.0, 0.9]"] {
+            let manifest = REFERENCE.replace("[7.0, 6.0, 3.2]", dimensions);
+            assert!(
+                RoomGeometry::parse(&manifest)
+                    .unwrap_err()
+                    .contains("between 1 and 50 m")
+            );
+        }
     }
 }

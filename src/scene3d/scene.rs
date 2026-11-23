@@ -52,6 +52,7 @@ pub struct SceneObject<'a> {
     pub presence: f32,
     /// Content reference frame: scene-relative numbers are black, head-locked numbers white.
     pub head_locked: bool,
+    pub screen_reference: bool,
     /// Where this object has been, oldest first, in the same normalized
     /// coordinates as `position`.
     pub trail: &'a [[f32; 3]],
@@ -89,10 +90,14 @@ pub struct SceneInput<'a> {
 /// footprint, its trail and its nameplate all ask here, so none of them can
 /// disagree with another about where the object is.
 #[must_use]
-pub fn object_position(position: [f32; 3], room: Option<&RoomView>) -> [f32; 3] {
+pub fn object_position(
+    object: &SceneObject<'_>,
+    position: [f32; 3],
+    room: Option<&RoomView>,
+) -> [f32; 3] {
     room.map_or_else(
         || object_world_position(position),
-        |room| room.place(position),
+        |room| room.place(position, object.head_locked, object.screen_reference),
     )
 }
 
@@ -433,7 +438,7 @@ fn add_object(
     room: Option<&RoomView>,
     view: &ViewContext,
 ) {
-    let [x, y, z] = object_position(object.position, room);
+    let [x, y, z] = object_position(object, object.position, room);
     let floor = floor_of(room);
     let edge = params::OBJECT_EDGE;
     let base = receded(object_colour(object, view), object, view);
@@ -745,7 +750,7 @@ fn add_trail(
         } else {
             edge
         };
-        let [x, y, z] = object_position(*point, room);
+        let [x, y, z] = object_position(object, *point, room);
         let arrival = trail_jump_at(object, index);
         let departure = trail_jump_at(object, index.saturating_add(1));
         if arrival || departure {
@@ -769,7 +774,7 @@ fn add_trail(
         if arrival && let Some(previous) = index.checked_sub(1) {
             jump_arrow(
                 mesh,
-                object_position(object.trail[previous], room),
+                object_position(object, object.trail[previous], room),
                 [x, y, z],
                 view,
             );
@@ -890,6 +895,7 @@ mod tests {
             loudness: 1.0,
             presence: 1.0,
             head_locked: false,
+            screen_reference: false,
             trail: &[],
             trail_jumps: &[],
             trail_loudness: &[],
@@ -1200,9 +1206,9 @@ mod tests {
         // Rear right and below the ears: at 1.5 m per unit it would be under
         // the floor, so the room pulls it in along its own ray.
         let object = sounding([0.5, -1.0, 0.5]);
-        let expected = room.place(object.position);
+        let expected = room.place(object.position, object.head_locked, object.screen_reference);
         assert!(expected[1] > room.floor_y());
-        assert!((expected[1] - object_position(object.position, None)[1]).abs() > 0.05);
+        assert!((expected[1] - object_position(&object, object.position, None)[1]).abs() > 0.05);
         let empty = in_room(&room, &[]);
         let one = in_room(&room, &[object]);
         let cube = &one.solid[empty.solid.len()..];

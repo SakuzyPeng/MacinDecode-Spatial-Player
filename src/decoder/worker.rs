@@ -1363,6 +1363,8 @@ fn own_state(state: SceneObjectState) -> SpatialObjectState {
         state.semantic_complete(SemanticScope::Spatial),
     )
     .with_tracking(own_tracking(state.headphone_policy()))
+    // Match the AC-4 Core ADM export: a signalled screen factor maps to screenRef.
+    .with_screen_reference(state.screen_factor().is_some())
 }
 
 fn own_tracking(policy: macindecode_ac4_scene::HeadphonePolicyState) -> super::ContentHeadTracking {

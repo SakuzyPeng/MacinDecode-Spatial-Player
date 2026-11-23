@@ -330,7 +330,8 @@ instead of the panner's box:
 - **Objects are drawn where they actually sound.** Mapped to metres by the scene unit (each
   direction to its own wall when it is Automatic), a source beyond a wall is pulled back inside
   along its own direction, and the scene draws it there; its nameplate, drop
-  line, footprint and trail follow. The position the Scene asked for is not drawn.
+  line, footprint and trail follow. A head-locked source keeps its head-relative distance when
+  the listener turns.
 - **No LFE.** The room renderer gives the LFE no position, so there is no LFE cabinet here and no
   nameplate for it.
 
@@ -423,7 +424,8 @@ is compatible, preserving all measurement directions and the interpolation resol
 room, rendered to two channels through personal HRIRs with 3DoF head rotation, always at 48 kHz and
 in the renderer's realtime tier. It resamples nothing, so it plays 48 kHz programmes only; any other
 rate is refused with a suggestion to use SAF HRTF. The room's reverberation plays out after the
-programme ends. Choosing it replaces the page with three controls:
+programme ends. Choosing Room for the first time opens the room package picker. You can scroll
+the HRTF page to reach the geometry and screen controls.
 
 - **Room** — the room package's `room.json`. Room and HRIR packages are a manifest plus component
   files beside it, so they are picked where they lie rather than copied into the data directory; the
@@ -462,9 +464,9 @@ programme ends. Choosing it replaces the page with three controls:
     sources 0.15 m inside every boundary, along their own direction), how far each direction
     reaches, and how loud unit distance plays. The reference room clears every wall at 1.5 m but
     plays about 2.9 dB above its reference; at 2.1 m the ceiling pulls overhead sources in.
-- **Screen mapping** (collapsed) — screen-referenced (`screenRef`) objects are moved from the
-  **reference screen** they were mixed against onto the **reproduction screen** they are watched on,
-  by BS.2127-1 §7.3.3's polar edge warping; nothing else moves. Mapping needs **Reproduction
+- **Screen mapping** (collapsed) — objects carrying an AC-4 screen factor move from the
+  **reference screen** they were mixed against onto the **reproduction screen** using the polar
+  edge transform from BS.2127-1 §7.3.3. The room view applies the same transform. Mapping needs **Reproduction
   screen** ticked; **Reference screen** is the standard one (straight ahead, 58° wide, 1.78:1)
   unless set to Custom. Each screen takes polar coordinates (azimuth positive to the left,
   elevation, distance, angular width) or Cartesian ones (x right, y front, z up, width along X);
@@ -472,11 +474,10 @@ programme ends. Choosing it replaces the page with three controls:
   would refuse about the geometry. Edits stay in a draft until **Apply**; **Revert** drops them;
   **Copy as JSON** copies `mradm.screen-config` v1 for `mradm --screen-config`.
 
-The room can change during playback: the new room is prepared in the background and crossfaded in
-while the old one keeps sounding, and a missing or damaged package is refused on the spot without
-touching the room that is playing. Changed while paused, the room is taken up when playback resumes.
-The HRIR, the scene unit and the screens are fixed when a session is created, so changing any of
-them prepares a new output.
+A room change prepares in the background and crossfades during playback. Playback and preferences
+keep the previous room until the renderer applies the change. A change requested while paused can
+take effect on resume. A seek or the end of the programme can cancel a pending change before the
+crossfade starts. Changing the HRIR, scene unit or screens prepares a new output.
 
 ### Headphone compensation (HpTF)
 

@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::state::{
     KWeighting, element_state_at, lfe_render_state, listener_render_state, remaining_ramps,
-    state_at_updates, validate_block,
+    state_at_updates, unclamped_listener_render_state, validate_block,
 };
 use super::{
     OutputDeviceInfo, OutputDeviceSelection, OutputPhase, OutputSettings, OutputSnapshot,
@@ -16,6 +16,7 @@ use crate::decoder::{
     DecodedSceneBlock, SceneMetadataUpdate, SceneQueueReader, SceneSignature, SpatialObjectState,
 };
 use crate::head_tracking::NativeTarget;
+use crate::room_package::RoomGeometry;
 use crate::scene_view::{
     LFE_METER_SLOT, LfeView, LoudnessBin, MAX_VIEW_OBJECTS, METER_SLOTS, ObjectEnergy, ObjectView,
     SceneViewMirror, loudness_bin_frames,
@@ -198,6 +199,95 @@ struct SourceState {
     snapshot: OutputSnapshot,
 }
 
+enum RoomSwitchStage {
+    Loading {
+        settings: native::RoomSettings,
+        result: mpsc::Receiver<Result<native::RoomPackage, String>>,
+    },
+    Requested(u64),
+}
+
+struct RoomSwitch {
+    epoch: u64,
+    stage: RoomSwitchStage,
+    next_poll: Instant,
+}
+
+impl RoomSwitch {
+    fn start(settings: native::RoomSettings, epoch: u64) -> Result<Self, String> {
+        let (send, result) = mpsc::channel();
+        let path = settings.manifest.clone();
+        thread::Builder::new()
+            .name("room-loading".into())
+            .spawn(move || {
+                let _ = send.send(native::RoomPackage::load(&path));
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            epoch,
+            stage: RoomSwitchStage::Loading { settings, result },
+            next_poll: Instant::now(),
+        })
+    }
+
+    fn poll(&mut self, control: &native::Control, epoch: u64) -> Option<Result<(), String>> {
+        let cancelled = || Err("Playback changed before the room could be applied".into());
+        let now = Instant::now();
+        if self.epoch == epoch && now < self.next_poll {
+            return None;
+        }
+        self.next_poll = now + Duration::from_millis(25);
+        let revision = match &self.stage {
+            RoomSwitchStage::Requested(revision) => *revision,
+            RoomSwitchStage::Loading { settings, result } => {
+                if self.epoch != epoch {
+                    return Some(cancelled());
+                }
+                match result.try_recv() {
+                    Ok(Ok(package)) => match control.request_room(settings, &package) {
+                        Ok(revision) => {
+                            self.stage = RoomSwitchStage::Requested(revision);
+                            revision
+                        }
+                        Err(error) => return Some(Err(error)),
+                    },
+                    Ok(Err(error)) => return Some(Err(error)),
+                    Err(mpsc::TryRecvError::Empty) => return None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Some(Err("Room loading stopped unexpectedly".into()));
+                    }
+                }
+            }
+        };
+        let status = match control.try_room_status() {
+            Ok(Some(status)) => status,
+            Ok(None) => return Some(Err("This output renders no room".into())),
+            Err(error) => return Some(Err(error)),
+        };
+        // A seek can commit an incoming room whose crossfade already began.
+        // Check the applied revision before treating an epoch change as cancellation.
+        if status.applied_revision == revision {
+            return Some(Ok(()));
+        }
+        if status.requested_revision != revision || self.epoch != epoch {
+            return Some(cancelled());
+        }
+        match status.state {
+            native::RoomState::Failed => Some(Err(if status.message.is_empty() {
+                "The room could not be prepared".into()
+            } else {
+                status.message
+            })),
+            // At end of input Core drops a request that has yet to enter its
+            // crossfade and reports the previous room as applied.
+            native::RoomState::Applied => Some(Err(
+                "The programme ended before the room could be applied".into(),
+            )),
+            _ => None,
+        }
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     playing: AtomicBool,
@@ -205,6 +295,7 @@ struct Shared {
     source: Mutex<SourceState>,
     switch: Mutex<Option<native::RendererSettings>>,
     switch_result: Mutex<Option<Result<(), String>>>,
+    initial_room: Mutex<Option<Arc<RoomGeometry>>>,
     hptf: Mutex<Option<(super::HptfRequest, u64)>>,
     hptf_result: Mutex<Option<(u64, Result<bool, String>)>>,
     hptf_busy: AtomicBool,
@@ -264,6 +355,7 @@ impl Runtime {
             }),
             switch: Mutex::new(None),
             switch_result: Mutex::new(None),
+            initial_room: Mutex::new(None),
             hptf: Mutex::new(None),
             hptf_result: Mutex::new(None),
             hptf_busy: AtomicBool::new(false),
@@ -397,6 +489,12 @@ impl Runtime {
         self.shared.volume.store(gain.to_bits(), Ordering::Relaxed);
     }
     pub fn switch(&self, settings: native::RendererSettings) {
+        if room_session(&self.format.renderer) != room_session(&settings) {
+            self.shared.finish_switch(Err(
+                "Changing the room renderer or its session settings requires a new output".into(),
+            ));
+            return;
+        }
         if self.format.renderer.speaker_renderer != settings.speaker_renderer {
             *self
                 .shared
@@ -452,11 +550,34 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     pub fn take_switch_result(&self) -> Option<Result<(), String>> {
-        self.shared
+        let result = self
+            .shared
             .switch_result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .take();
+        result.or_else(|| {
+            self.join
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished)
+                .then(|| Err("The output stopped before applying the renderer settings".into()))
+        })
+    }
+
+    pub fn initial_room(&self) -> Option<Arc<RoomGeometry>> {
+        self.shared
+            .initial_room
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+impl Shared {
+    fn finish_switch(&self, result: Result<(), String>) {
+        *self
+            .switch_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
     }
 }
 impl Drop for Runtime {
@@ -656,19 +777,21 @@ impl MetadataFrame {
     }
 }
 
-fn own_state(state: Option<SpatialObjectState>) -> native::ObjectState {
+fn own_state(state: Option<SpatialObjectState>, screen_mapping: bool) -> native::ObjectState {
     state.map_or(
         native::ObjectState {
             active: false,
             gain: 0.0,
             position: None,
             head_locked: false,
+            screen_reference: screen_mapping.then_some(false),
         },
         |state| native::ObjectState {
             active: state.metadata_active() && state.semantic_complete(),
             gain: state.linear_gain().unwrap_or(1.0),
             position: state.position().map(|p| [p.x(), p.y(), p.z()]),
             head_locked: state.tracking().head_locked(),
+            screen_reference: screen_mapping.then_some(state.screen_reference()),
         },
     )
 }
@@ -677,6 +800,8 @@ fn renderer_fields(core: u32) -> u64 {
     u64::from(core & crate::decoder::FIELD_ACTIVE != 0)
         | (u64::from(core & crate::decoder::FIELD_GAIN != 0) << 1)
         | (u64::from(core & crate::decoder::FIELD_POSITION != 0) << 2)
+        | (u64::from(core & crate::decoder::FIELD_SCREEN_FACTOR != 0)
+            * native::FIELD_SCREEN_REFERENCE)
         | (u64::from(core & crate::decoder::FIELD_HEAD_TRACKING != 0) << 8)
 }
 
@@ -699,6 +824,10 @@ fn with_scene_frame<T>(
     renderer: &native::RendererSettings,
     submit: impl FnOnce(&native::Frame<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
+    let screen_mapping = renderer
+        .room
+        .as_ref()
+        .is_some_and(|room| room.screens.is_some());
     let from = usize::try_from(offset).map_err(|_| "Scene trim offset overflow")?;
     let mut planes: Vec<_> = block
         .objects()
@@ -714,12 +843,10 @@ fn with_scene_frame<T>(
         .map(|object| {
             (
                 object.element_id(),
-                own_state(element_state_at(
-                    block,
-                    object.element_id(),
-                    object.initial_state(),
-                    offset,
-                )),
+                own_state(
+                    element_state_at(block, object.element_id(), object.initial_state(), offset),
+                    screen_mapping,
+                ),
             )
         })
         .collect();
@@ -773,18 +900,17 @@ fn with_scene_frame<T>(
                     gain: 1.0,
                     position: None,
                     head_locked: false,
+                    screen_reference: None,
                 }
             } else {
-                own_state(element_state_at(
-                    block,
-                    element,
-                    block.lfes()[index].initial_state(),
-                    offset,
-                ))
+                own_state(
+                    element_state_at(block, element, block.lfes()[index].initial_state(), offset),
+                    false,
+                )
             },
         ));
     }
-    let updates = frame_updates(block, offset, &initial, routed.is_some());
+    let updates = frame_updates(block, offset, &initial, routed.is_some(), screen_mapping);
     submit(&native::Frame {
         epoch,
         generation: u64::from(block.configuration_generation()),
@@ -802,11 +928,12 @@ fn frame_updates(
     offset: u32,
     initial: &[(u64, native::ObjectState)],
     resolved_lfes: bool,
+    screen_mapping: bool,
 ) -> Vec<native::Update> {
     let mut updates = Vec::new();
     // A trimmed block can begin inside a ramp: synthesize its remaining target
     // at offset zero instead of freezing at the interpolated initial state.
-    for (id, _) in initial {
+    for (id, state) in initial {
         if resolved_lfes
             && !block
                 .objects()
@@ -821,7 +948,7 @@ fn frame_updates(
                 offset: 0,
                 ramp: update.ramp_frames(),
                 changed: renderer_fields(update.changed_fields()),
-                state: own_state(Some(update.state())),
+                state: own_state(Some(update.state()), state.screen_reference.is_some()),
             });
         }
     }
@@ -842,7 +969,14 @@ fn frame_updates(
                 offset: u.offset_frames() - offset,
                 ramp: u.ramp_frames(),
                 changed: renderer_fields(u.changed_fields()),
-                state: own_state(Some(u.state())),
+                state: own_state(
+                    Some(u.state()),
+                    screen_mapping
+                        && !block
+                            .lfes()
+                            .iter()
+                            .any(|lfe| lfe.element_id() == u.element_id()),
+                ),
             }),
     );
     filter_updates(initial, &mut updates, block.duration_frames() - offset);
@@ -854,27 +988,36 @@ fn filter_updates(
     updates: &mut Vec<native::Update>,
     duration: u32,
 ) {
-    let mut tracking: Vec<_> = initial
+    let mut discrete: Vec<_> = initial
         .iter()
-        .map(|(id, state)| (*id, state.head_locked))
+        .map(|(id, state)| (*id, state.head_locked, state.screen_reference))
         .collect();
-    // A mode-only or diagnostic-only policy update must not even split an
-    // HRTF interpolation segment. Keep only actual reference-frame changes.
+    // Changes to policy details and to the strength of an already-enabled
+    // screen reference should leave continuous gain and position ramps alone.
     for update in updates.iter_mut() {
-        if update.changed & 256 != 0
-            && let Some((_, previous)) = tracking.iter_mut().find(|(id, _)| *id == update.element)
+        if update.changed & (256 | native::FIELD_SCREEN_REFERENCE) != 0
+            && let Some((_, head_locked, screen_reference)) =
+                discrete.iter_mut().find(|(id, _, _)| *id == update.element)
         {
-            if *previous == update.state.head_locked {
-                update.changed &= !256;
-            } else {
-                *previous = update.state.head_locked;
+            if update.changed & 256 != 0 {
+                if *head_locked == update.state.head_locked {
+                    update.changed &= !256;
+                }
+                *head_locked = update.state.head_locked;
+            }
+            if update.changed & native::FIELD_SCREEN_REFERENCE != 0 {
+                if *screen_reference == update.state.screen_reference {
+                    update.changed &= !native::FIELD_SCREEN_REFERENCE;
+                }
+                *screen_reference = update.state.screen_reference;
             }
         }
-        update.changed &= if update.state.position.is_some() {
-            7 | 256
-        } else {
-            3 | 256
-        };
+        if update.state.position.is_none() {
+            update.changed &= !4;
+        }
+        if update.state.screen_reference.is_none() {
+            update.changed &= !native::FIELD_SCREEN_REFERENCE;
+        }
     }
     updates.retain(|update| update.changed != 0 && update.offset < duration);
 }
@@ -913,6 +1056,7 @@ fn submit_gap(
                         .contains(&id)
                         .then_some([0.0, 1.0, 0.0]),
                     head_locked: false,
+                    screen_reference: None,
                 },
             )
         })
@@ -927,6 +1071,21 @@ fn submit_gap(
         initial: &initial,
         updates: &[],
     })
+}
+
+fn start_renderer_switch(
+    shared: &Arc<Shared>,
+    control: &native::Control,
+    settings: native::RendererSettings,
+) {
+    let loader = control.clone();
+    let reply = Arc::clone(shared);
+    let spawned = thread::Builder::new()
+        .name("hrtf-preparation".into())
+        .spawn(move || reply.finish_switch(loader.switch_renderer(&session_renderer(&settings))));
+    if let Err(error) = spawned {
+        shared.finish_switch(Err(error.to_string()));
+    }
 }
 
 #[allow(
@@ -947,12 +1106,31 @@ fn run(
     let mut serial = 0;
     let mut holding = false;
     let native_config = native_config(settings, config.sample_rate, &config.output_device);
+    let screen_mapping = native_config
+        .renderer
+        .room
+        .as_ref()
+        .is_some_and(|room| room.screens.is_some());
+    let render_state = if native_config.renderer.room.is_some() {
+        unclamped_listener_render_state
+    } else {
+        listener_render_state
+    };
     let mut session = match prepared {
         Some(prepared) => prepared.take(&native_config)?,
         None => create_session(&native_config)?,
     };
     if shared.stop.load(Ordering::Relaxed) {
         return Ok(());
+    }
+    if let Some(room) = session
+        .initial_room_manifest()
+        .and_then(|text| RoomGeometry::parse(text).ok())
+    {
+        *shared
+            .initial_room
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(room));
     }
     let mut target =
         i64::try_from(config.start_frame).map_err(|_| "Scene target exceeds signed time")?;
@@ -986,6 +1164,7 @@ fn run(
     let mut gain = f32::NAN;
     let mut last_view_time = target;
     let mut iterations = 0;
+    let mut room_switch: Option<RoomSwitch> = None;
     while !shared.stop.load(Ordering::Relaxed) {
         let changed = {
             let mut source = shared
@@ -1056,24 +1235,21 @@ fn run(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            let loader = control.clone();
-            let reply = Arc::clone(shared);
-            let spawned = thread::Builder::new()
-                .name("hrtf-preparation".into())
-                .spawn(move || {
-                    let result = loader.switch_renderer(&session_renderer(&settings));
-                    *reply
-                        .switch_result
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-                });
-            if let Err(error) = spawned {
-                *shared
-                    .switch_result
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(Err(error.to_string()));
+            if let Some(room) = settings.room {
+                match RoomSwitch::start(room, epoch) {
+                    Ok(request) => room_switch = Some(request),
+                    Err(error) => shared.finish_switch(Err(error)),
+                }
+            } else {
+                start_renderer_switch(shared, &control, settings);
             }
+        }
+        if let Some(result) = room_switch
+            .as_mut()
+            .and_then(|request| request.poll(&control, epoch))
+        {
+            room_switch = None;
+            shared.finish_switch(result);
         }
         if !shared.hptf_busy.load(Ordering::Acquire)
             && let Some((request, revision)) = shared
@@ -1207,13 +1383,15 @@ fn run(
                     .enumerate()
                     .map(|(slot, (id, initial))| {
                         let state = state_at_updates(&frame.updates, *id, *initial, offset);
-                        let (active, position, gain) = listener_render_state(state);
+                        let (active, position, gain) = render_state(state);
                         ObjectView {
                             element_id: *id,
                             active: active && frame.complete,
                             position,
                             gain,
                             tracking: state.map_or_default(SpatialObjectState::tracking),
+                            screen_reference: screen_mapping
+                                && state.is_some_and(SpatialObjectState::screen_reference),
                             jumped: frame.updates.iter().any(|u| {
                                 u.element_id() == *id
                                     && u.changed_fields() & crate::decoder::FIELD_POSITION != 0
@@ -1889,12 +2067,75 @@ mod tests {
     }
 
     #[test]
+    fn screen_reference_survives_a_trimmed_prefix_and_can_be_cleared() {
+        use crate::decoder::{FIELD_SCREEN_FACTOR, SceneObjectPcm, SpatialPosition};
+
+        let state = |screen| {
+            SpatialObjectState::new(
+                true,
+                Some(SpatialPosition::new(0.3, 0.8, 0.0)),
+                Some(1.0),
+                true,
+            )
+            .with_screen_reference(screen)
+        };
+        let block = DecodedSceneBlock::new(
+            48_000,
+            0,
+            32,
+            1,
+            0,
+            None,
+            true,
+            vec![SceneObjectPcm::new(1, Some(state(false)), vec![0.0; 32])],
+            None,
+            vec![
+                SceneMetadataUpdate::new(1, 4, 0, FIELD_SCREEN_FACTOR, state(true)),
+                SceneMetadataUpdate::new(1, 12, 0, FIELD_SCREEN_FACTOR, state(false)),
+            ],
+        );
+        let settings = OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            binaural_renderer: super::super::BinauralRenderer::Room,
+            room: "room.json".into(),
+            room_screen: super::super::ScreenSettings {
+                reproduction_enabled: true,
+                reproduction: super::super::ScreenGeometry {
+                    width: 90.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut renderer = settings.renderer();
+        with_scene_frame(1, &block, 8, &renderer, |frame| {
+            assert_eq!(frame.initial[0].1.screen_reference, Some(true));
+            assert_eq!(frame.updates.len(), 1);
+            assert_eq!(frame.updates[0].changed, native::FIELD_SCREEN_REFERENCE);
+            assert_eq!(frame.updates[0].state.screen_reference, Some(false));
+            assert_eq!(frame.updates[0].offset, 4);
+            Ok(())
+        })
+        .unwrap();
+
+        renderer.room = None;
+        with_scene_frame(1, &block, 8, &renderer, |frame| {
+            assert_eq!(frame.initial[0].1.screen_reference, None);
+            assert!(frame.updates.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn unchanged_tracking_policies_do_not_split_native_render_segments() {
         let initial = native::ObjectState {
             active: true,
             gain: 1.0,
             position: Some([0.0, 1.0, 0.0]),
             head_locked: false,
+            screen_reference: None,
         };
         let update = |offset, head_locked, changed| native::Update {
             element: 7,
@@ -1903,6 +2144,7 @@ mod tests {
             changed,
             state: native::ObjectState {
                 head_locked,
+                screen_reference: None,
                 ..initial
             },
         };

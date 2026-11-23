@@ -125,21 +125,28 @@ use crate::decoder::metadata::{MetadataRamp, interpolate_state};
 /// what the scene view draws in — one conversion, so a picture of a scene and
 /// the scene itself cannot disagree about where anything is.
 pub(super) fn listener_render_state(state: Option<SpatialObjectState>) -> (bool, [f32; 3], f32) {
+    let (active, position, gain) = unclamped_listener_render_state(state);
+    (
+        active,
+        position.map(|coordinate| coordinate.clamp(-1.0, 1.0)),
+        gain,
+    )
+}
+
+pub(super) fn unclamped_listener_render_state(
+    state: Option<SpatialObjectState>,
+) -> (bool, [f32; 3], f32) {
     let Some(state) = state else {
         return (false, [0.0; 3], 0.0);
     };
     let Some(position) = state.position() else {
         return (false, [0.0; 3], 0.0);
     };
-    let windows_position = [
-        position.x().clamp(-1.0, 1.0),
-        position.z().clamp(-1.0, 1.0),
-        (-position.y()).clamp(-1.0, 1.0),
-    ];
+    let position = [position.x(), position.z(), -position.y()];
     let gain = state.linear_gain().unwrap_or(1.0);
     (
         state.metadata_active() && state.semantic_complete(),
-        windows_position,
+        position,
         gain,
     )
 }
