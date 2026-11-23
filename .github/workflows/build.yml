@@ -123,8 +123,10 @@ jobs:
           key: license-tool-${{ matrix.os }}-${{ matrix.target }}-${{ steps.license_tool.outputs.version }}
           path: .ci-tools/bin
       - name: Prepare pinned native build tools and full decoder inputs
+        # The `cmake` crate picks the newest Visual Studio generator the runner has;
+        # windows-2025 now carries VS 2026, whose generator CMake 4.2 added.
         run: |
-          python -m pip install cmake==3.31.6 ninja==1.11.1.4
+          python -m pip install cmake==4.2.3
           python scripts/prepare_inputs.py
       - name: Format
         run: cargo fmt --all -- --check

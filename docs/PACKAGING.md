@@ -23,7 +23,7 @@ Windows 每次构建生成新的 ProductCode，保留固定 UpgradeCode 和组�
 
 ## 构建
 
-Windows 使用 Python 3.12、MSVC、.NET SDK；macOS 使用 Python 3.11+ 和支持 C++20 stop_token 的 Apple 工具链。CI 固定 Xcode 26.3、CMake 3.31.6、Ninja 1.11.1.4、cargo-about 0.9.2 和 WiX 5.0.2。
+Windows 使用 Python 3.12、MSVC、.NET SDK；macOS 使用 Python 3.11+ 和支持 C++20 stop_token 的 Apple 工具链。CI 固定 Xcode 26.3、CMake 4.2.3（Windows runner 带 VS 2026，其生成器自 CMake 4.2 起才有）、cargo-about 0.9.2 和 WiX 5.0.2。
 
 WiX UI 扩展同样锁定为 5.0.2，缓存于 `.ci-tools/`。仅引用标准 MSI 对话框和错误／进度文本，不引入可执行的 CustomAction。
 
