@@ -54,6 +54,11 @@ fn main() {
     // Packaging records where the archives were built and which commit.
     println!("cargo:lib_dir={}", manifest.parent().unwrap().display());
     println!("cargo:source_dir={}", source.display());
+    // The crate's own room tests play ADM Core's synthetic room fixture.
+    println!(
+        "cargo:rustc-env=MACINRENDER_CORE_SOURCE={}",
+        source.display()
+    );
     println!("cargo:linkage=static");
     let include = source.join("include");
     let bridge = source.join("gui/native");

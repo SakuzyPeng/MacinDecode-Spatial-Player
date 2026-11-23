@@ -137,6 +137,7 @@ fn check_renderers() -> Result<Vec<serde_json::Value>, String> {
                 layout: layout.into(),
                 sofa: String::new(),
                 split_lfe: true,
+                room: None,
             },
             output: OutputKind::Null,
             device_id: String::new(),

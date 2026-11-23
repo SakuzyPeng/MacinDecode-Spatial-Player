@@ -1155,7 +1155,7 @@ mod tests {
             "../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
         ))
         .unwrap();
-        RoomView::new(&room, 1.5)
+        RoomView::new(&room, Some(1.5))
     }
 
     fn in_room<'a>(room: &'a RoomView, objects: &'a [SceneObject<'a>]) -> MeshBuilder {

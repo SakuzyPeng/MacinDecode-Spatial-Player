@@ -7,6 +7,10 @@ use crate::raw;
 macro_rules! api {
     ($($name:ident ($($arg:ty),*) -> $result:ty;)*) => {
         #[derive(Clone)]
+        #[cfg_attr(
+            not(native_macinrender),
+            allow(dead_code, reason = "only the linked build checks the ABI version")
+        )]
         pub struct Api {
             $(pub $name: unsafe extern "C" fn($($arg),*) -> $result,)*
         }
@@ -27,8 +31,9 @@ macro_rules! api {
                 }
                 let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
-                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 44 {
-                    return Err("MacinRender C ABI v1.44 or later is required".into());
+                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 49 {
+                    // 1.48 fixes the room quality per session, 1.49 adds automatic room mapping.
+                    return Err("MacinRender C ABI v1.49 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)
@@ -74,5 +79,17 @@ api! {
         *mut u32
     ) -> i32;
     adm_monitor_output_devices_json(*mut c_void, *mut *mut c_char) -> i32;
+    adm_room_load(*mut c_void, *const c_char, *mut *mut c_void) -> i32;
+    adm_room_destroy(*mut c_void) -> ();
+    adm_create_scene_stream_with_room_quality(
+        *mut c_void,
+        *const raw::StreamConfig,
+        *const raw::RoomConfig,
+        i32,
+        *const c_char,
+        *mut *mut c_void
+    ) -> i32;
+    adm_scene_stream_switch_room(*const c_void, *const raw::RoomConfig, *mut u64, *mut *mut c_char) -> i32;
+    adm_scene_stream_room_status_json(*const c_void, *mut *mut c_char) -> i32;
     adm_free_string(*mut c_char) -> ();
 }

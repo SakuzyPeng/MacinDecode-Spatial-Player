@@ -17,7 +17,7 @@ pub use controller::SpatialOutputController;
 pub use screen::{ScreenCoordinates, ScreenGeometry, ScreenSettings};
 pub use settings::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,
-    SpeakerLayout, SpeakerRenderer,
+    RoomScale, SpeakerLayout, SpeakerRenderer,
 };
 
 #[cfg(feature = "decode")]

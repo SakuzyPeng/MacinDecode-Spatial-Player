@@ -48,6 +48,7 @@ fn triple_balance_player_capabilities_are_enabled_for_all_three_layouts() {
                 layout: layout.into(),
                 sofa: String::new(),
                 split_lfe: false,
+                room: None,
             },
             48_000,
         )
@@ -69,6 +70,7 @@ fn triple_balance_plays_objects_with_an_lfe_only_bed() {
                 layout: layout.into(),
                 sofa: String::new(),
                 split_lfe: false,
+                room: None,
             },
             output: OutputKind::Null,
             device_id: String::new(),
@@ -187,6 +189,7 @@ fn check_renderer_lfe_output(
             layout: layout.into(),
             sofa: String::new(),
             split_lfe: split,
+            room: None,
         },
         // Leave output paused and pull the native PCM directly for inspection.
         output: OutputKind::Null,

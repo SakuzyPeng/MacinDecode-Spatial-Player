@@ -76,6 +76,13 @@ fn declare_spatial_output() {
     }
     if macinrender {
         println!("cargo::rustc-cfg=macinrender_output");
+        // The room tests play ADM Core's synthetic room fixture.
+        if let Some(source) = env::var_os("DEP_MACINRENDER_SOURCE_DIR") {
+            println!(
+                "cargo::rustc-env=MACINRENDER_CORE_SOURCE={}",
+                PathBuf::from(source).display()
+            );
+        }
     }
     if (windows && decode) || macinrender {
         println!("cargo::rustc-cfg=spatial_output");

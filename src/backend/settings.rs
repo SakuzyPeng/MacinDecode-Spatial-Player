@@ -45,20 +45,35 @@ impl BinauralRenderer {
     }
 }
 
-/// How many metres one unit of Scene distance spans in the modelled room.
+/// How Scene distance becomes metres in the modelled room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RoomScale {
+    /// Each axis is mapped on its own, from the listener to the wall in that
+    /// direction less the boundary clearance, so ±1 reaches the walls. The
+    /// renderer's default (`metres_per_unit` 0).
+    #[default]
+    #[serde(rename = "automatic")]
+    Automatic,
+    /// One scale in every direction: `room_metres_per_unit` metres per unit.
+    #[serde(rename = "fixed")]
+    Fixed,
+}
+impl RoomScale {
+    pub const ALL: [Self; 2] = [Self::Automatic, Self::Fixed];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Fixed => "Fixed",
+        }
+    }
+}
+
+/// How many metres one unit of Scene distance spans under a fixed scale.
 ///
 /// The range and the default are the renderer's own (`adm_room_config_t`):
 /// outside it the renderer refuses the configuration rather than clamping.
 pub const ROOM_METRES_PER_UNIT_DEFAULT: f64 = 1.5;
 pub const ROOM_METRES_PER_UNIT_RANGE: std::ops::RangeInclusive<f64> = 0.01..=100.0;
-
-/// Why room playback cannot start yet, before any output is asked for.
-///
-/// The interface ships ahead of the renderer: until the pinned `MacinRender`
-/// carries room rendering (C ABI 1.46) and `backend/macinrender.rs` drives it,
-/// choosing the room renderer is stored but refuses to play, rather than
-/// quietly playing SAF HRTF under a room label.
-pub const ROOM_PLAYBACK_UNAVAILABLE: &str = "Room binaural playback is not available in this build yet: it needs MacinRender's room renderer (C ABI 1.46)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SpeakerLayout {
@@ -118,10 +133,13 @@ pub struct OutputSettings {
     /// The room package (`room.json`) the room renderer models; empty is none
     /// chosen, which the renderer cannot play.
     pub room: String,
-    /// Personal HRIR package (`hrir.json`) for the room renderer; empty uses
-    /// the HRIR the room package binds. A SOFA file is not one: it has to be
-    /// prepared into this form first.
+    /// A SOFA file or a prepared HRIR package (`hrir.json`) for the room
+    /// renderer; empty uses the HRIR the room package binds. The renderer
+    /// prepares a SOFA itself when the session is created.
     pub room_hrir: String,
+    pub room_scale: RoomScale,
+    /// The fixed scale, kept while the scale is automatic so that choosing
+    /// a fixed one again returns to it.
     pub room_metres_per_unit: f64,
     /// Screen mapping for screen-referenced objects; room renderer only.
     pub room_screen: ScreenSettings,
@@ -152,6 +170,7 @@ impl Default for OutputSettings {
             sofa: String::new(),
             room: String::new(),
             room_hrir: String::new(),
+            room_scale: RoomScale::default(),
             room_metres_per_unit: ROOM_METRES_PER_UNIT_DEFAULT,
             room_screen: ScreenSettings::default(),
             hptf: String::new(),
@@ -224,17 +243,19 @@ impl OutputSettings {
         self.mode.resolved() == SpatialBackendKind::SafBinaural
             && self.binaural_renderer == BinauralRenderer::Room
     }
+    /// Metres per Scene unit as the renderer takes it: `None` is automatic.
+    pub fn room_fixed_scale(&self) -> Option<f64> {
+        match self.room_scale {
+            RoomScale::Automatic => None,
+            RoomScale::Fixed => Some(self.room_metres_per_unit),
+        }
+    }
     /// Why these settings cannot start an output, when the reason is already
     /// known from the settings alone. The output paths ask before creating a
     /// session, so the refusal arrives as an ordinary output error.
     pub fn playback_blocker(&self) -> Option<&'static str> {
-        if !self.room_selected() {
-            None
-        } else if self.room.is_empty() {
-            Some("Choose a room package for room binaural playback")
-        } else {
-            Some(ROOM_PLAYBACK_UNAVAILABLE)
-        }
+        (self.room_selected() && self.room.is_empty())
+            .then_some("Choose a room package for room binaural playback")
     }
     pub fn validated(mut self) -> Self {
         self.posebridge.validate();
@@ -294,8 +315,8 @@ impl OutputSettings {
                     || (self.binaural_renderer == BinauralRenderer::Room
                         && (self.room_hrir != other.room_hrir
                             || self.room_screen != other.room_screen
-                            || self.room_metres_per_unit.to_bits()
-                                != other.room_metres_per_unit.to_bits()))))
+                            || self.room_fixed_scale().map(f64::to_bits)
+                                != other.room_fixed_scale().map(f64::to_bits)))))
             || self.native_device != other.native_device
             || self.stereo_device != other.stereo_device
     }
@@ -317,6 +338,17 @@ impl OutputSettings {
                 String::new()
             },
             split_lfe: self.split_lfe,
+            room: (self.room_selected() && !self.room.is_empty()).then(|| {
+                macindecode_macinrender::RoomSettings {
+                    manifest: self.room.clone(),
+                    hrir: self.room_hrir.clone(),
+                    metres_per_unit: self.room_fixed_scale(),
+                    screens: self
+                        .room_screen
+                        .maps()
+                        .then(|| self.room_screen.config_json()),
+                }
+            }),
         }
     }
 }
@@ -355,6 +387,10 @@ mod tests {
         let old: OutputSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.binaural_renderer, BinauralRenderer::SafHrtf);
         assert!(old.room.is_empty() && old.room_hrir.is_empty());
+        // The scale starts automatic, the renderer's own default, and keeps
+        // the fixed value for when a fixed scale is chosen.
+        assert_eq!(old.room_scale, RoomScale::Automatic);
+        assert_eq!(old.room_fixed_scale(), None);
         assert_eq!(
             old.room_metres_per_unit.to_bits(),
             ROOM_METRES_PER_UNIT_DEFAULT.to_bits()
@@ -383,8 +419,15 @@ mod tests {
         hrir.room_hrir = "hrir/personal/hrir.json".into();
         assert!(room.needs_rebuild(&hrir));
         let mut scale = room.clone();
-        scale.room_metres_per_unit = 2.0;
+        scale.room_scale = RoomScale::Fixed;
         assert!(room.needs_rebuild(&scale));
+        // The fixed value is the session's only under a fixed scale.
+        let mut kept = room.clone();
+        kept.room_metres_per_unit = 2.0;
+        assert!(!room.needs_rebuild(&kept));
+        let mut fixed = scale.clone();
+        fixed.room_metres_per_unit = 2.0;
+        assert!(scale.needs_rebuild(&fixed));
         let mut screen = room.clone();
         screen.room_screen.reproduction_enabled = true;
         assert!(room.needs_rebuild(&screen));
@@ -401,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn room_playback_refuses_until_the_renderer_can_run_it() {
+    fn room_playback_needs_a_room_and_hands_the_renderer_what_it_fixes() {
         let mut settings = OutputSettings {
             mode: SpatialBackendKind::SafBinaural,
             ..OutputSettings::default()
@@ -413,8 +456,32 @@ mod tests {
                 .playback_blocker()
                 .is_some_and(|reason| reason.contains("room package"))
         );
+        #[cfg(macinrender_output)]
+        assert_eq!(settings.renderer().room, None);
         settings.room = "rooms/studio-a/room.json".into();
-        assert_eq!(settings.playback_blocker(), Some(ROOM_PLAYBACK_UNAVAILABLE));
+        assert_eq!(settings.playback_blocker(), None);
+        #[cfg(macinrender_output)]
+        {
+            let room = settings.renderer().room.expect("a room session");
+            assert_eq!(room.manifest, "rooms/studio-a/room.json");
+            assert!(room.hrir.is_empty());
+            assert_eq!(room.metres_per_unit, None);
+            assert_eq!(room.screens, None);
+            settings.room_scale = RoomScale::Fixed;
+            settings.room_screen.reproduction_enabled = true;
+            let room = settings.renderer().room.expect("a room session");
+            assert_eq!(room.metres_per_unit, Some(ROOM_METRES_PER_UNIT_DEFAULT));
+            assert_eq!(
+                room.screens,
+                settings
+                    .room_screen
+                    .maps()
+                    .then(|| settings.room_screen.config_json())
+            );
+            // The same choice under speakers renders no room.
+            settings.mode = SpatialBackendKind::SystemSpatial;
+            assert_eq!(settings.renderer().room, None);
+        }
     }
 
     #[test]

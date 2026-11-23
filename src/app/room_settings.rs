@@ -15,7 +15,7 @@ use std::pin::Pin;
 use super::{Arc, Context, DialogWake, PlayerApp, Poll, Waker, egui, theme};
 use crate::backend::{
     BinauralRenderer, OutputSettings, ROOM_METRES_PER_UNIT_DEFAULT, ROOM_METRES_PER_UNIT_RANGE,
-    ScreenCoordinates, ScreenGeometry,
+    RoomScale, ScreenCoordinates, ScreenGeometry,
 };
 use crate::room_package::{REVERBERATION_TOLERANCE, RoomGeometry, Surface};
 use crate::scene3d::room::RoomView;
@@ -146,25 +146,37 @@ impl PlayerApp {
 
         ui.horizontal(|ui| {
             ui.label("Scene unit");
-            ui.add(
-                egui::DragValue::new(&mut settings.room_metres_per_unit)
-                    .range(ROOM_METRES_PER_UNIT_RANGE)
-                    .speed(0.01)
-                    .max_decimals(2)
-                    .suffix(" m"),
-            )
-            .on_hover_text(
-                "How many metres one unit of Scene distance spans in the room. Sources are kept inside the walls along their own direction.",
-            );
-            if ui
-                .add_enabled(
-                    settings.room_metres_per_unit.to_bits()
-                        != ROOM_METRES_PER_UNIT_DEFAULT.to_bits(),
-                    egui::Button::new("Reset"),
+            egui::ComboBox::from_id_salt("room-scale")
+                .selected_text(settings.room_scale.label())
+                .show_ui(ui, |ui| {
+                    for scale in RoomScale::ALL {
+                        ui.selectable_value(&mut settings.room_scale, scale, scale.label());
+                    }
+                })
+                .response
+                .on_hover_text(match settings.room_scale {
+                    RoomScale::Automatic => "Each direction is mapped on its own, from the listener to that wall: unit distance reaches every wall, kept the room's boundary clearance away from it.",
+                    RoomScale::Fixed => "One distance in every direction: sources are kept inside the walls along their own direction.",
+                });
+            if settings.room_scale == RoomScale::Fixed {
+                ui.add(
+                    egui::DragValue::new(&mut settings.room_metres_per_unit)
+                        .range(ROOM_METRES_PER_UNIT_RANGE)
+                        .speed(0.01)
+                        .max_decimals(2)
+                        .suffix(" m"),
                 )
-                .clicked()
-            {
-                settings.room_metres_per_unit = ROOM_METRES_PER_UNIT_DEFAULT;
+                .on_hover_text("How many metres one unit of Scene distance spans in the room.");
+                if ui
+                    .add_enabled(
+                        settings.room_metres_per_unit.to_bits()
+                            != ROOM_METRES_PER_UNIT_DEFAULT.to_bits(),
+                        egui::Button::new("Reset"),
+                    )
+                    .clicked()
+                {
+                    settings.room_metres_per_unit = ROOM_METRES_PER_UNIT_DEFAULT;
+                }
             }
         });
 
@@ -281,7 +293,7 @@ impl PlayerApp {
             .id_salt("room-geometry")
             .default_open(true)
             .show(ui, |ui| match geometry {
-                Ok(room) => draw_room_card(ui, room, settings.room_metres_per_unit),
+                Ok(room) => draw_room_card(ui, room, settings.room_fixed_scale()),
                 Err(error) => {
                     ui.colored_label(theme::WARNING, error);
                 }
@@ -334,7 +346,7 @@ pub(super) fn room_view_of(
     room_geometry(slot, &settings.room)
         .as_ref()
         .ok()
-        .map(|room| RoomView::new(room, settings.room_metres_per_unit))
+        .map(|room| RoomView::new(room, settings.room_fixed_scale()))
 }
 
 fn mark(ui: &mut egui::Ui, met: bool) {
@@ -353,7 +365,7 @@ fn elevation_label(elevation: i32) -> String {
     }
 }
 
-fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) {
+fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: Option<f64>) {
     draw_room_facts(ui, room);
     ui.add_space(4.0);
     ui.strong("BS.1116-3 · EBU Tech 3276 room geometry");
@@ -371,6 +383,10 @@ fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) 
 
     ui.add_space(4.0);
     ui.strong("Scene unit in this room");
+    let Some(metres_per_unit) = metres_per_unit else {
+        draw_automatic_scale(ui, room);
+        return;
+    };
     let reach = room.reach();
     let pulled = reach
         .iter()
@@ -407,6 +423,41 @@ fn draw_room_card(ui: &mut egui::Ui, room: &RoomGeometry, metres_per_unit: f64) 
         format!(
             "Unit distance plays {:+.1} dB against the room's {:.2} m reference",
             room.unit_distance_gain_db(metres_per_unit),
+            room.reference_distance
+        ),
+    );
+}
+
+/// What automatic mapping makes of unit distance in this room: a distance of
+/// its own in each direction, every one of them the wall less the clearance.
+fn draw_automatic_scale(ui: &mut egui::Ui, room: &RoomGeometry) {
+    let walls = room.wall_reach();
+    ui.horizontal_wrapped(|ui| {
+        mark(ui, true);
+        ui.label(format!(
+            "Automatic: unit distance reaches each wall, {:.2} m short of it",
+            room.boundary_clearance
+        ));
+    });
+    ui.colored_label(
+        theme::MUTED,
+        walls
+            .iter()
+            .map(|(direction, metres)| format!("{direction} {metres:.2} m"))
+            .collect::<Vec<_>>()
+            .join(" · "),
+    );
+    let (near, far) = walls
+        .iter()
+        .fold((f64::INFINITY, 0.0_f64), |(near, far), (_, metres)| {
+            (near.min(*metres), far.max(*metres))
+        });
+    ui.colored_label(
+        theme::MUTED,
+        format!(
+            "Unit distance plays {:+.1} to {:+.1} dB against the room's {:.2} m reference",
+            room.unit_distance_gain_db(far),
+            room.unit_distance_gain_db(near),
             room.reference_distance
         ),
     );
@@ -670,7 +721,7 @@ fn package_label(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{RoomGeometrySlot, package_label, room_view_of};
-    use crate::backend::{BinauralRenderer, OutputSettings, SpatialBackendKind};
+    use crate::backend::{BinauralRenderer, OutputSettings, RoomScale, SpatialBackendKind};
 
     #[test]
     fn the_room_view_needs_the_room_renderer_a_readable_package_and_the_switch() {
@@ -685,6 +736,7 @@ mod tests {
             mode: SpatialBackendKind::SafBinaural,
             binaural_renderer: BinauralRenderer::Room,
             room: manifest.to_str().unwrap().into(),
+            room_scale: RoomScale::Fixed,
             room_metres_per_unit: 2.1,
             ..OutputSettings::default()
         };

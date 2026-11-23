@@ -309,7 +309,7 @@ restarts. Choose **Default figure** to restore the original listener.
 
 ### The room view
 
-**Draw the modelled room** (on by default): while the [room binaural](#room-binaural-preview)
+**Draw the modelled room** (on by default): while the [room binaural](#room-binaural)
 renderer forms the headphone feed, the 3D scene draws the room package's room at its own proportions
 instead of the panner's box:
 
@@ -322,12 +322,14 @@ instead of the panner's box:
 - **The floor is a metric ruler** counted from the listener: 0.5 m squares, a heavier line every
   metre, and two axes through the listener.
 - **The dashed box is the Scene's unit cube** — the ordinary view's whole box — centred on the
-  ears and sized by the scene unit; whatever part of it leaves the reachable room is drawn red.
+  ears and sized by the scene unit; whatever part of it leaves the reachable room is drawn red. With
+  an Automatic scene unit the cube is exactly the reachable room.
 - **The listener sits**, in Minecraft's sitting pose, with the head's centre on the listening
   position, at real size (about 1.6 m tall on a 0.3 m seat in the reference room), on a low-backed
   chair. The chair is not in the room model and has no effect on the sound. Skins work as usual.
-- **Objects are drawn where they actually sound.** Scaled by the scene unit, a source beyond a wall
-  is pulled back inside along its own direction, and the scene draws it there; its nameplate, drop
+- **Objects are drawn where they actually sound.** Mapped to metres by the scene unit (each
+  direction to its own wall when it is Automatic), a source beyond a wall is pulled back inside
+  along its own direction, and the scene draws it there; its nameplate, drop
   line, footprint and trail follow. The position the Scene asked for is not drawn.
 - **No LFE.** The room renderer gives the LFE no position, so there is no LFE cabinet here and no
   nameplate for it.
@@ -414,19 +416,25 @@ Large SOFA datasets use accelerated triangulation and sparse interpolation table
 geometry cache. Seeking, repeating and changing tracks reuse the prepared HRTF when the output format
 is compatible, preserving all measurement directions and the interpolation resolution.
 
-#### Room binaural (preview)
+#### Room binaural
 
 **Binaural renderer** at the top of the `HRTF` page chooses between SAF HRTF (the default) and
 **Room**. Room is MacinRender's native room renderer: a fixed listening position inside a modelled
-room, rendered to two channels through personal HRIRs with 3DoF head rotation, always at 48 kHz.
-Choosing it replaces the page with three controls:
+room, rendered to two channels through personal HRIRs with 3DoF head rotation, always at 48 kHz and
+in the renderer's realtime tier. It resamples nothing, so it plays 48 kHz programmes only; any other
+rate is refused with a suggestion to use SAF HRTF. The room's reverberation plays out after the
+programme ends. Choosing it replaces the page with three controls:
 
 - **Room** — the room package's `room.json`. Room and HRIR packages are a manifest plus component
   files beside it, so they are picked where they lie rather than copied into the data directory; the
   page names them as folder/manifest, with the full path on hover.
 - **HRIR** — an optional personal SOFA file or prepared HRIR package (`hrir.json`); without one the
   room package's own binding is used. The renderer prepares a SOFA itself when the session is created.
-- **Scene unit** — how many metres one unit of Scene distance spans, 0.01–100 m, 1.5 m by default.
+- **Scene unit** — how Scene distance becomes metres in the room. **Automatic** (the default, and the
+  renderer's own) maps each axis on its own from the listener: ±1 reaches the wall in that direction,
+  kept the room's boundary clearance away from it, so sources stay inside and unit distance differs
+  by direction. **Fixed** uses one scale in every direction, 0.01–100 m, 1.5 m by default; the value
+  is kept while Automatic is chosen, so choosing Fixed again returns to it.
 - **Room geometry** — a card shown once a room package is chosen, read straight from the
   dimensions, listening position and distances in its `room.json`.
   - **Package** and **SHA-256** — whether this is a preset MacinRender publishes, recognised by
@@ -446,12 +454,14 @@ Choosing it replaces the page with three controls:
   - **Geometry only.** Decay and early reflections are for the package's own acoustic report to
     state; background noise, the operational room response and the listening level depend on the
     headphones and the room you actually sit in, which a model cannot claim.
-  - **Scene unit in this room** — whether a source at one Scene unit is pulled in by a wall, the
-    ceiling or the floor at ear level, +30°, +45°, overhead and −30° (the renderer keeps sources
-    0.15 m inside every boundary, along their own direction), how far each direction reaches, and
-    how loud unit distance plays against the room's reference distance (2.1 m in the reference
-    room). The reference room clears every wall at the default 1.5 m but plays about 2.9 dB above its
-    reference; at 2.1 m the ceiling pulls overhead sources in.
+  - **Scene unit in this room** — under Automatic, unit distance in each of the six directions
+    (3.45 / 3.25 / 2.85 / 2.85 / 1.85 / 1.05 m front, back, left, right, up and down in the reference
+    room) and the range it plays at against the room's reference distance (2.1 m in the reference
+    room; about −4.3 to +6.0 dB). Under Fixed, whether a source at one Scene unit is pulled in by a
+    wall, the ceiling or the floor at ear level, +30°, +45°, overhead and −30° (the renderer keeps
+    sources 0.15 m inside every boundary, along their own direction), how far each direction
+    reaches, and how loud unit distance plays. The reference room clears every wall at 1.5 m but
+    plays about 2.9 dB above its reference; at 2.1 m the ceiling pulls overhead sources in.
 - **Screen mapping** (collapsed) — screen-referenced (`screenRef`) objects are moved from the
   **reference screen** they were mixed against onto the **reproduction screen** they are watched on,
   by BS.2127-1 §7.3.3's polar edge warping; nothing else moves. Mapping needs **Reproduction
@@ -462,14 +472,11 @@ Choosing it replaces the page with three controls:
   would refuse about the geometry. Edits stay in a draft until **Apply**; **Revert** drops them;
   **Copy as JSON** copies `mradm.screen-config` v1 for `mradm --screen-config`.
 
-The room can change during playback; the HRIR, the scene unit and the screens are fixed when a
-session is created, so changing any of them prepares a new output.
-
-**This version ships the interface only.** The settings are saved, but the MacinRender the player
-pins does not carry room rendering yet (that needs C ABI 1.46), so starting playback with Room
-selected shows a specific error instead of quietly playing SAF HRTF. With Room selected and a
-readable package, the 3D scene already draws the room (see [the room view](#the-room-view)), only
-without objects yet.
+The room can change during playback: the new room is prepared in the background and crossfaded in
+while the old one keeps sounding, and a missing or damaged package is refused on the spot without
+touching the room that is playing. Changed while paused, the room is taken up when playback resumes.
+The HRIR, the scene unit and the screens are fixed when a session is created, so changing any of
+them prepares a new output.
 
 ### Headphone compensation (HpTF)
 

@@ -341,6 +341,23 @@ impl RoomGeometry {
         })
     }
 
+    /// How far one Scene unit reaches in each direction under automatic
+    /// mapping (`metres_per_unit` 0): from the listener to that wall, less
+    /// the boundary clearance. Room axes run x to the front and y to the left.
+    pub fn wall_reach(&self) -> [(&'static str, f64); 6] {
+        let [x, y, z] = self.listener;
+        let [front, side, height] = self.dimensions;
+        let clearance = self.boundary_clearance;
+        [
+            ("Front", front - clearance - x),
+            ("Back", x - clearance),
+            ("Left", side - clearance - y),
+            ("Right", y - clearance),
+            ("Up", height - clearance - z),
+            ("Down", z - clearance),
+        ]
+    }
+
     /// How much louder than the room's unity reference a source at one Scene
     /// unit plays, before any wall moves it.
     pub fn unit_distance_gain_db(&self, metres_per_unit: f64) -> f64 {

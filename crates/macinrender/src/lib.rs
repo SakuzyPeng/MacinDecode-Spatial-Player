@@ -22,6 +22,8 @@ pub mod motion;
 )]
 mod native_link;
 mod raw;
+#[cfg(all(test, native_macinrender))]
+mod room_tests;
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex};
@@ -53,9 +55,102 @@ pub struct RendererSettings {
     pub layout: String,
     pub sofa: String,
     pub split_lfe: bool,
+    /// The room renderer forms the binaural feed instead of SAF HRTF. Ignored
+    /// on a speaker output.
+    pub room: Option<RoomSettings>,
+}
+
+/// What a room session is created with (`adm_room_config_t` and the screens).
+///
+/// The renderer fixes everything here but the room package itself when the
+/// session is created: switching to another room keeps the HRIR, the scale
+/// and the screens.
+#[derive(Debug, Clone)]
+pub struct RoomSettings {
+    /// The room package's `room.json`.
+    pub manifest: String,
+    /// A SOFA file, a prepared HRIR package or a collection; empty listens
+    /// through the HRIR the room package binds.
+    pub hrir: String,
+    /// Metres per unit of Scene distance; `None` maps each axis of the room
+    /// from the listener to its walls, which is the renderer's own default.
+    pub metres_per_unit: Option<f64>,
+    /// `mradm.screen-config` v1; `None` leaves every position unchanged.
+    pub screens: Option<String>,
+}
+
+impl PartialEq for RoomSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.manifest == other.manifest
+            && self.hrir == other.hrir
+            && self.metres_per_unit.map(f64::to_bits) == other.metres_per_unit.map(f64::to_bits)
+            && self.screens == other.screens
+    }
+}
+impl Eq for RoomSettings {}
+
+/// `ADM_ROOM_QUALITY_REALTIME`: native SIMD FFTs and a staggered reflection
+/// grid (`room-realtime-v2`). The exact tier keeps the cross-platform bit
+/// contract offline rendering needs; playback needs the deadline instead,
+/// and it is the tier the renderer's device soak tests run.
+const ROOM_QUALITY_REALTIME: i32 = 1;
+
+/// Where a room change stands (`mradm.room-status` v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomState {
+    Applied,
+    Preparing,
+    Transitioning,
+    Draining,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomStatus {
+    pub state: RoomState,
+    pub requested_revision: u64,
+    pub applied_revision: u64,
+    /// Sources the walls are holding inside the room this instant.
+    pub constrained_sources: u64,
+    pub message: String,
+}
+
+impl RoomStatus {
+    fn parse(json: &str) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| format!("Room status: {error}"))?;
+        let number = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        Ok(Self {
+            state: match value.get("state").and_then(serde_json::Value::as_str) {
+                Some("applied") => RoomState::Applied,
+                Some("preparing") => RoomState::Preparing,
+                Some("transitioning") => RoomState::Transitioning,
+                Some("draining") => RoomState::Draining,
+                Some("failed") => RoomState::Failed,
+                other => return Err(format!("Unknown room state {other:?}")),
+            },
+            requested_revision: number("requested_revision"),
+            applied_revision: number("applied_revision"),
+            constrained_sources: number("constrained_sources"),
+            message: value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+    }
 }
 
 impl RendererSettings {
+    fn room(&self) -> Option<&RoomSettings> {
+        self.room.as_ref().filter(|_| self.binaural)
+    }
+
     const fn geometry(&self) -> i32 {
         if !self.binaural && matches!(self.speaker_renderer, SpeakerRenderer::TripleBalance) {
             0
@@ -70,10 +165,17 @@ impl RendererSettings {
         } else {
             &self.layout
         })?;
-        let sofa = string(&self.sofa)?;
+        // The room takes its HRIR through its own configuration.
+        let sofa = string(if self.room().is_some() {
+            ""
+        } else {
+            &self.sofa
+        })?;
         Ok(action(&raw::RendererConfig {
             size: size::<raw::RendererConfig>(),
-            renderer: if self.binaural {
+            renderer: if self.room().is_some() {
+                8
+            } else if self.binaural {
                 6
             } else {
                 match self.speaker_renderer {
@@ -300,6 +402,11 @@ impl Shared {
             output: std::ptr::null_mut(),
             gate: Mutex::new(()),
         };
+        let screens = match settings.room().and_then(|room| room.screens.as_deref()) {
+            Some(json) => Some(string(json)?),
+            None => None,
+        };
+        let mut stream = std::ptr::null_mut();
         let code = settings.with_raw(|rendering| {
             let raw = raw::StreamConfig {
                 size: size::<raw::StreamConfig>(),
@@ -308,13 +415,66 @@ impl Shared {
                 output_rate: 48_000,
                 ..Default::default()
             };
-            // SAFETY: every borrowed string/config lives until this synchronous call returns.
-            unsafe {
-                (owned.api.adm_create_scene_stream)(context, &raw const raw, &raw mut owned.stream)
+            match settings.room() {
+                // SAFETY: every borrowed string/config lives until this synchronous call returns.
+                None => Ok(unsafe {
+                    (owned.api.adm_create_scene_stream)(context, &raw const raw, &raw mut stream)
+                }),
+                // SAFETY: as above; the stream retains the room package it was handed.
+                Some(room) => owned.with_room(room, |config| unsafe {
+                    (owned.api.adm_create_scene_stream_with_room_quality)(
+                        context,
+                        &raw const raw,
+                        config,
+                        ROOM_QUALITY_REALTIME,
+                        screens
+                            .as_ref()
+                            .map_or(std::ptr::null(), |json| json.as_ptr()),
+                        &raw mut stream,
+                    )
+                }),
             }
-        })?;
+        })??;
+        owned.stream = stream;
         owned.error(code, 0)?;
         Ok(owned)
+    }
+    /// Load the room package for one synchronous call. Every entry point that
+    /// takes a room configuration keeps the package it needs, so the handle is
+    /// released as soon as the call returns. The caller serializes context
+    /// errors.
+    fn with_room<T>(
+        &self,
+        room: &RoomSettings,
+        action: impl FnOnce(&raw::RoomConfig) -> T,
+    ) -> Result<T, String> {
+        struct Loaded<'a>(&'a Api, *mut c_void);
+        impl Drop for Loaded<'_> {
+            fn drop(&mut self) {
+                // SAFETY: the handle came from adm_room_load; NULL is permitted.
+                unsafe { (self.0.adm_room_destroy)(self.1) };
+            }
+        }
+        let manifest = string(&room.manifest)?;
+        let hrir = string(&room.hrir)?;
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: the context is live and the manifest outlives the call.
+        let code =
+            unsafe { (self.api.adm_room_load)(self.context, manifest.as_ptr(), &raw mut handle) };
+        let loaded = Loaded(&self.api, handle);
+        self.error(code, 0)
+            .map_err(|error| format!("Cannot load the room package {}: {error}", room.manifest))?;
+        Ok(action(&raw::RoomConfig {
+            size: size::<raw::RoomConfig>(),
+            reserved: 0,
+            room: loaded.1,
+            hrir: if room.hrir.is_empty() {
+                std::ptr::null()
+            } else {
+                hrir.as_ptr()
+            },
+            metres_per_unit: room.metres_per_unit.unwrap_or(0.0),
+        }))
     }
     fn error(&self, code: i32, domain: u8) -> Result<(), String> {
         if code == 0 {
@@ -411,11 +571,14 @@ pub fn probe_player_renderer(settings: &RendererSettings, sample_rate: u32) -> R
         if status.phase == Phase::Failed {
             return Err(control.failure_message());
         }
-        if status.phase == Phase::Ended && status.presented == 64 {
+        // A room's reverberation plays on past the programme's end.
+        if status.phase == Phase::Ended
+            && (status.presented == 64 || (settings.room().is_some() && status.presented > 64))
+        {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err("Renderer capability probe timed out".into());
+            return Err(format!("Renderer capability probe timed out: {status:?}"));
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -722,6 +885,9 @@ impl Control {
         )
     }
     pub fn switch_renderer(&self, settings: &RendererSettings) -> Result<(), String> {
+        if let Some(room) = settings.room() {
+            return self.switch_room(room);
+        }
         let s = &self.inner;
         let mut error = std::ptr::null_mut();
         let code = settings.with_raw(|raw| {
@@ -742,6 +908,93 @@ impl Control {
             } else {
                 message
             })
+        }
+    }
+    /// Hand a running room session another room package and, while the
+    /// output is rendering, wait until the new room can be heard.
+    ///
+    /// The renderer keeps the old room playing until the new one is ready, so
+    /// a failure leaves the audible room in place. It takes the request up as
+    /// it renders: a paused output holds it until playback resumes, so there
+    /// the accepted request is the answer. Loading the package is synchronous
+    /// either way, which is what refuses a missing or malformed one. The HRIR,
+    /// the scale and the screens stay what the session was created with: a
+    /// change to those needs a new session.
+    fn switch_room(&self, room: &RoomSettings) -> Result<(), String> {
+        use std::time::{Duration, Instant};
+        let s = &self.inner;
+        let request = {
+            // Loading reports through the context's error storage.
+            let _guard = s.gate.lock().unwrap();
+            let mut request = 0;
+            let mut error = std::ptr::null_mut();
+            let code = s.with_room(room, |config| {
+                // SAFETY: the Arc retains the stream; this entry point owns its error string.
+                unsafe {
+                    (s.api.adm_scene_stream_switch_room)(
+                        s.stream,
+                        config,
+                        &raw mut request,
+                        &raw mut error,
+                    )
+                }
+            })?;
+            let message = copy_text(error);
+            // SAFETY: ownership was transferred by the switch entry point.
+            unsafe { (s.api.adm_free_string)(error) };
+            if code != 0 {
+                return Err(if message.is_empty() {
+                    format!("MacinRender room error {code}")
+                } else {
+                    message
+                });
+            }
+            request
+        };
+        // Preparing a room reads and designs its filters: seconds, not frames.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let status = self.room_status()?;
+            if status.applied_revision >= request {
+                return Ok(());
+            }
+            if !matches!(
+                self.status()?.phase,
+                Phase::Playing | Phase::Buffering | Phase::Draining
+            ) {
+                return Ok(());
+            }
+            if status.state == RoomState::Failed && status.requested_revision == request {
+                return Err(if status.message.is_empty() {
+                    "The room could not be prepared".into()
+                } else {
+                    status.message
+                });
+            }
+            if Instant::now() >= deadline {
+                return Err("Preparing the room timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn room_status(&self) -> Result<RoomStatus, String> {
+        self.try_room_status()?
+            .ok_or_else(|| "This output renders no room".to_owned())
+    }
+    /// The room renderer's own account of its room; `None` for a session that
+    /// renders none.
+    pub fn try_room_status(&self) -> Result<Option<RoomStatus>, String> {
+        let s = &self.inner;
+        let mut json = std::ptr::null_mut();
+        // SAFETY: the Arc retains the stream; the status string is owned by the caller.
+        let code = unsafe { (s.api.adm_scene_stream_room_status_json)(s.stream, &raw mut json) };
+        let text = copy_text(json);
+        // SAFETY: ownership was transferred; NULL is permitted.
+        unsafe { (s.api.adm_free_string)(json) };
+        match code {
+            0 => RoomStatus::parse(&text).map(Some),
+            UNSUPPORTED => Ok(None),
+            _ => Err(format!("MacinRender room status error {code}")),
         }
     }
     /// Load, replace or (with an empty profile) disable headphone compensation.
@@ -1057,6 +1310,7 @@ mod tests {
             layout: "4+7+0".into(),
             sofa: String::new(),
             split_lfe: false,
+            room: None,
         };
         let stream = Shared::create_stream(&renderer, 48_000).unwrap();
         assert!(stream.output.is_null());
@@ -1226,6 +1480,7 @@ mod tests {
                 layout: "4+7+0".into(),
                 sofa: String::new(),
                 split_lfe: true,
+                room: None,
             },
             output: OutputKind::Null,
             device_id: String::new(),
@@ -1313,6 +1568,7 @@ mod tests {
             layout: "4+7+0".into(),
             sofa: String::new(),
             split_lfe: true,
+            room: None,
         };
         let mut session = Session::new(&Config {
             renderer: settings.clone(),

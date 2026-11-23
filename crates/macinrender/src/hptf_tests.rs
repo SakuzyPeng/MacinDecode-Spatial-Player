@@ -12,6 +12,7 @@ fn slow_profile_io_leaves_submission_and_output_controls_live() {
             layout: "4+7+0".into(),
             sofa: String::new(),
             split_lfe: true,
+            room: None,
         },
         output: OutputKind::Null,
         device_id: String::new(),

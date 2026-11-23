@@ -1217,6 +1217,85 @@ mod tests {
         }
     }
 
+    /// The room renderer through the controller, as the room page drives it:
+    /// a room session plays, and choosing another package switches it under
+    /// the same output instead of building a new one.
+    #[cfg(macinrender_output)]
+    #[test]
+    fn a_room_session_plays_and_takes_another_room_under_the_same_output() {
+        let fixture = std::path::Path::new(env!("MACINRENDER_CORE_SOURCE"))
+            .join("tests/fixtures/room/synthetic");
+        let copy = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(&fixture).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), copy.path().join(entry.file_name())).unwrap();
+        }
+        let room =
+            |directory: &std::path::Path| directory.join("room.json").to_str().unwrap().to_owned();
+        let mut output = SpatialOutputController::new();
+        output.install_settings(OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            binaural_renderer: super::super::BinauralRenderer::Room,
+            room: room(&fixture),
+            ..Default::default()
+        });
+        let key = PlaybackKey::new(41, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        let config = output_config(SceneSignature::from_block(&tone(0)));
+        // A second and a half of programme: long enough to switch inside it.
+        for block in 0..70 {
+            queue.try_push(key, tone(block * 1024)).unwrap();
+        }
+        queue.mark_end_of_stream(key);
+        output.ensure_configured(&config, reader);
+        output.play();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while output.snapshot().phase() != OutputPhase::Playing {
+            output.poll();
+            assert_ne!(
+                output.snapshot().phase(),
+                OutputPhase::Failed,
+                "{:?}",
+                output.snapshot()
+            );
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        let slot = output.runtime.as_ref().unwrap().control_slot();
+        let desired = OutputSettings {
+            room: room(copy.path()),
+            ..output.settings().clone()
+        };
+        assert!(!output.settings().needs_rebuild(&desired));
+        output.hot_settings(desired.clone());
+        let result = loop {
+            output.poll();
+            if let Some(result) = output.take_settings_result() {
+                break result;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(result, Ok(()));
+        assert_eq!(output.settings(), &desired);
+        assert!(Arc::ptr_eq(
+            &slot,
+            &output.runtime.as_ref().unwrap().control_slot()
+        ));
+        while output.snapshot().phase() != OutputPhase::Ended {
+            output.poll();
+            assert_ne!(
+                output.snapshot().phase(),
+                OutputPhase::Failed,
+                "{:?}",
+                output.snapshot()
+            );
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn a_new_track_keeps_the_output_while_its_decoder_opens() {
         let mut output = SpatialOutputController::new();

@@ -28,6 +28,17 @@ pub struct RendererConfig {
     pub lfe: i32,
     pub smoothing: u32,
 }
+/// `adm_room_config_t` (v1.46). `metres_per_unit` 0 asks for automatic room
+/// mapping (v1.49); a positive value is a fixed scale.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RoomConfig {
+    pub size: u32,
+    pub reserved: u32,
+    pub room: *const c_void,
+    pub hrir: *const c_char,
+    pub metres_per_unit: f64,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct StreamConfig {

@@ -978,7 +978,7 @@ fn screen_edits_reach_the_settings_only_when_applied_and_valid() {
 
 #[test]
 fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
-    use crate::backend::OutputSettings;
+    use crate::backend::{OutputSettings, RoomScale};
 
     fn frame(
         app: &mut PlayerApp,
@@ -1034,6 +1034,20 @@ fn the_room_card_reads_the_chosen_manifest_and_follows_the_scene_unit() {
     assert!(has(&text, "42.0 m² · 134.4 m³"));
     assert!(has(&text, "0.276 s"));
     assert!(has(&text, "0.94 on every surface and band"));
+    assert_eq!(text.iter().filter(|line| *line == "✓").count(), 6);
+    // The renderer's default maps each direction to its own wall.
+    assert!(has(
+        &text,
+        "Automatic: unit distance reaches each wall, 0.15 m short of it"
+    ));
+    assert!(has(
+        &text,
+        "Front 3.45 m · Back 3.25 m · Left 2.85 m · Right 2.85 m · Up 1.85 m · Down 1.05 m"
+    ));
+    assert!(has(&text, "Unit distance plays -4.3 to +6.0 dB"));
+
+    settings.room_scale = RoomScale::Fixed;
+    let text = frame(&mut app, &context, &settings);
     assert_eq!(text.iter().filter(|line| *line == "✓").count(), 6);
     assert!(has(&text, "At 1.50 m, unit distance clears every wall"));
     assert!(has(&text, "Unit distance plays +2.9 dB"));
@@ -1138,7 +1152,7 @@ fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
         "../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
     ))
     .unwrap();
-    let room = RoomView::new(&room, 1.5);
+    let room = RoomView::new(&room, Some(1.5));
     let object = SceneObject {
         position: [0.5, -1.0, 0.5],
         active: true,

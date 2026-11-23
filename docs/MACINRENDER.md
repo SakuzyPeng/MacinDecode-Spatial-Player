@@ -57,14 +57,16 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 报出的悬停行决定，曲线画什么由旋钮决定。写盘那一步是 `stage_tuned_profile`，不碰任何应用状态，
 因此那条 `#` 来源注释与文件名可以脱离 GUI 直接测。
 
-## 房间双耳（仅界面）
+## 房间双耳
 
 软件双耳的 `HRTF` 页顶部是 `Binaural renderer`：SAF HRTF（默认）或 Room，与系统空间音频的
 `Speaker renderer` 同构——两者向同一个立体声设备写同样的两声道，所以是模式内的选择而不是新模式，
 设备、头追和 `Headphones` 页沿用软件双耳。偏好字段为 `binaural_renderer`（`saf-hrtf` / `room`），
 旧设置缺省为 SAF HRTF。Room 另存 `room`（房间包清单）、`room_hrir`（个人 HRIR 包清单，空为房间包
-默认绑定）和 `room_metres_per_unit`（0.01–100，默认 1.5；加载时钳入范围，非有限值回到默认），
-对应上游 C ABI 1.46 的 `adm_room_config_t`。两种包都是清单加旁边的组件文件，所以原地选择
+默认绑定）、`room_scale`（`automatic` / `fixed`，缺省自动）和 `room_metres_per_unit`（固定比例的值，
+0.01–100，默认 1.5；加载时钳入范围，非有限值回到默认；自动时保留，改回固定即恢复），对应上游
+C ABI 的 `adm_room_config_t`：自动即 `metres_per_unit = 0`（1.49 起，也是上游默认），以听者为原点，
+各轴正负 1 分别映射到该方向墙面减去 `boundary_clearance`（见上游 `ROOM_COORDINATE_MAPPING.md`）。两种包都是清单加旁边的组件文件，所以原地选择
 （`app/room_settings.rs`），不进 `file_catalog` 的托管目录。
 
 `room_hrir` 接受 SOFA 或已准备的 HRIR 清单：上游 `c03af5f` 起，`hrir_manifest` 为 SOFA 时由渲染器在
@@ -76,7 +78,9 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 建议（面积、比例、整数比、左右对称），名义 Tm 只作为目标值显示。衰减和早反射属于上游
 `check-acoustics.py` 对滤波器的测量，播放器不读取、不推算也不声明。到墙距离按上游的射线约束和
 `boundary_clearance` 计算各仰角最坏方位的最大半径；单位距离电平差为
-`20·log10(reference_distance / max(scale, minimum_distance))`，未计入被墙拉回后的进一步变化。
+`20·log10(reference_distance / max(scale, minimum_distance))`，未计入被墙拉回后的进一步变化。自动比例下
+卡片改为列出前、后、左、右、上、下六个方向的单位距离（`RoomGeometry::wall_reach`），电平差按其中最远与
+最近给出范围。
 
 卡片只负责认出是哪一份：显示 `room.json` 原始字节的 SHA-256，并与 `room_package::KNOWN_PRESETS`
 比对，逐字节一致即标为上游发布的预设。清单记录每个组件的大小与 SHA-256，渲染器加载时逐一核对，所以清单
@@ -88,15 +92,16 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 
 `SceneInput::room` 有值时，`scene::build` 画房间视图而不是声像器方盒；`PlayerApp::room_view` 在
 `OutputSettings::room_selected()`、房间包可读且 Visual settings 的 **Draw the modelled room**（偏好字段
-`room_view`，默认开）同时成立时给出它，每帧按当前 `room_metres_per_unit` 构造。对象的位置统一走
+`room_view`，默认开）同时成立时给出它，每帧按当前比例（`OutputSettings::room_fixed_scale`，自动为 `None`）构造。对象的位置统一走
 `scene::object_position`：方块、落地线、足迹、轨迹和 app 画的铭牌（`nameplate_anchor`）都问同一处，
 互相不会对不上。普通视图的输出不变：用同一组对象和相机，经 wgpu 实际渲染的图像与改动前逐字节相同。
 
 `scene3d/room.rs` 把清单里的房间按真实比例画进场景：房间较长的一边对齐普通场景的房间宽度，耳朵仍在
 世界原点，房间 x 前、y 左、z 上转为场景的 −Z、−X、+Y；对象与人偶保持各自的世界尺寸。
 
-- **只画实际位置。** `RoomView::place` 逐项转写上游 `mradm-dsp` 的 `room::geometry::position`：按
-  Scene unit 缩放，至少保持 `minimum_distance`，沿自身射线停在第一面墙的 `boundary_clearance` 之内。
+- **只画实际位置。** `RoomView::place` 逐项转写上游 `mradm-dsp` 的 `room::geometry::position`：固定比例按
+  Scene unit 缩放整个向量，自动比例按 `room_offset` 逐轴缩放到该方向的墙；之后都至少保持 `minimum_distance`，
+  沿自身射线停在第一面墙的 `boundary_clearance` 之内。
   headLocked 走同一规则（上游用会话创建时的房间）。Scene 要求的位置不画，免得每个对象都要分辨两个方块。
   听者正中的声源没有方向，上游沿用上一个方向，单帧无从得知，按上游的初始方向放在正前方。
 - **LFE 不画。** 房间渲染里 LFE 走公共核，没有位置。
@@ -106,6 +111,7 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 - **地面标尺从听者量起**，0.5 m 一格、1 m 一粗线，两条中轴穿过听者，裁到房间内。
 - **Scene 单位立方体**以耳朵为中心、按 Scene unit 缩放，每条棱在可达体积（房间减去 `boundary_clearance`，
   听者在内且为凸体，所以内部的点都按要求的位置发声）处切分，可达与否分开标记；`minimum_distance` 不画。
+  自动比例下立方体就是可达体积本身，顶点直接取在留距面上，不经加减，免得舍入切出碎棱。
 - **听者坐着。** 用 Minecraft 的骑乘坐姿（`HumanoidModel`：腿前倾 1.4137 rad、外展 π/10，手臂前倾 π/5；
   腿的 0.0785 rad 绕自身长轴的滚转省略）。坐姿只把整条肢体绕关节旋转，不切分肢体，所以皮肤贴图不变；
   `figure::Pose` 是关节的唯一描述，人偶的方块和皮肤的每个像素都经过它。站姿在 `Pose::posed` 里直接返回原坐标，
@@ -125,15 +131,34 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR、比例或屏幕需要新会话；只换房间不重建，留给
 `adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
 
-固定的 `c87e18b` / C ABI 1.50 已带房间渲染（1.46 房间、1.47 屏幕、1.48 质量档），播放器还没有接上。
-`OutputSettings::playback_blocker` 在选中 Room 时总是返回错误（未选房间包时提示先选），
-`validate_source`、`PreparedSession::new` 和 `Runtime::replace_source` 在创建或复用会话前检查它：
-Room 选择既不会新建会话，也不会复用已持有的 SAF 会话、在 Room 名义下播放 SAF HRTF。接入时在
-`native::RendererSettings` 中携带房间配置，并删除 `ROOM_PLAYBACK_UNAVAILABLE` 这一分支。
+### 播放
 
-接入时要对齐的上游变化：`adm_room_config_t.metres_per_unit` 为 0 表示自动映射，且是上游默认；
-播放器的比例设置目前只有固定值（默认 1.5），要先决定是否提供“自动”。房间视图按
-`adm_scene_stream_room_source_json` 读实际受限后的坐标即可，不必在播放器里重算放置。
+`OutputSettings::renderer` 在选中 Room 且已选房间包时给 `native::RendererSettings` 带上
+`native::RoomSettings`（清单、HRIR、`metres_per_unit`（自动为 `None`）、屏幕 JSON（`maps()` 为假时为
+`None`））。crate 据此选渲染器 8（`ADM_RENDERER_ROOM_BINAURAL`），`sofa` 留空，HRIR 经
+`adm_room_config_t.hrir_manifest` 传入；会话经 `adm_create_scene_stream_with_room_quality` 创建，房间包用
+`adm_room_load` 载入、调用返回即释放（上游的流与切换请求各自持有所需的包）。C ABI 下限为 1.49。
+
+- **档位固定为 realtime**（`room-realtime-v2`，ADR 0020）：原生 SIMD FFT 与错开的反射网格，上游的设备长测
+  就在这一档。exact 档留给需要跨平台逐位一致的离线渲染；档位随会话固定，播放器不提供选择。
+- **只接受 48 kHz 节目。** 房间按房间包的采样率渲染、不做重采样（44.1 kHz 输入会被渲染器拒绝），输出流固定
+  48 kHz，所以 `validate_source` 在 Room 下对其他采样率直接给出可读的错误，建议改用 SAF HRTF。
+  96 kHz 房间包同样被渲染器拒绝。
+- **运行中换房。** 只改房间包时 `needs_rebuild` 为假，`hot_settings` 经 `Runtime::switch` 交给
+  `Control::switch_renderer`，后者对房间会话改走 `adm_scene_stream_switch_room`。包的载入是同步的，缺失或
+  损坏的包当场报错（错误里带路径），正在播放的房间不受影响。输出在渲染时，等到 room status 的
+  `applied_revision` 追上本次请求才返回，失败取其 `message`；暂停时渲染器要等恢复播放才接手请求
+  （状态停在 `preparing`），所以请求被接受即返回。切换必须保持会话创建时的 HRIR、比例和屏幕，否则渲染器拒绝。
+- **会话复用。** `replace_source` 换曲时比较会话固定的部分（`room_session`：去掉清单后的 `RoomSettings`），
+  房间包本身跟随 `switch`，与 SOFA 相同。
+- **尾声。** 房间的混响在节目结束后继续播放，`presented` 会超过节目长度（合成房间约 4441 帧），播放头仍封顶在
+  节目末尾。`probe_player_renderer` 对房间会话接受 `presented > 64`。
+- **测试。** crate 的 `room_tests` 与 `backend::controller` 的房间用例用上游 checkout 里的合成房间
+  `tests/fixtures/room/synthetic`（构建脚本经 `MACINRENDER_CORE_SOURCE` 交给测试），在定时 null 输出上
+  覆盖创建、对象与 LFE、自动与固定比例、播放中与暂停时换房、缺失的包和 44.1 kHz 的拒绝。
+
+房间视图仍在播放器里按上游规则重算放置；`adm_scene_stream_room_source_json` 能给出渲染器实际受限后的
+坐标，换成读取它是后续的改进。
 
 ## 耳机补偿（HpTF）
 

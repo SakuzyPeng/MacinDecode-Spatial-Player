@@ -84,13 +84,14 @@ pub struct RoomView {
     clearance: f64,
     minimum_distance: f64,
     coverage: [f64; 6],
-    metres_per_unit: f64,
+    /// Metres per Scene unit; `None` maps each axis to its walls.
+    metres_per_unit: Option<f64>,
     /// World units per metre.
     scale: f64,
 }
 
 impl RoomView {
-    pub fn new(room: &RoomGeometry, metres_per_unit: f64) -> Self {
+    pub fn new(room: &RoomGeometry, metres_per_unit: Option<f64>) -> Self {
         let [front, side, _] = room.dimensions;
         Self {
             dimensions: room.dimensions,
@@ -131,22 +132,32 @@ impl RoomView {
     ///
     /// `position` is what the scene view carries: normalised listener space,
     /// `+X` right, `+Y` up, `-Z` front. The arithmetic is `MacinRender`'s own
-    /// (`mradm-dsp` `room::geometry::position`): scale by the scene unit, keep
-    /// the source at least the minimum distance away, and stop it the boundary
-    /// clearance short of the first wall its ray meets. Head-locked sources go
-    /// through the same rule. A source at the listener's own position has no
-    /// direction; the renderer keeps the one it had, which a single frame does
-    /// not know, so this places it straight ahead, the renderer's own starting
-    /// direction.
+    /// (`mradm-dsp` `room::geometry::position`). A fixed scene unit scales the
+    /// whole vector; the automatic mapping scales each room axis on its own,
+    /// by the listener's distance to the wall it points at less the boundary
+    /// clearance, so ±1 lands on the walls. Either way the source stays at
+    /// least the minimum distance away and stops the boundary clearance short
+    /// of the first wall its ray meets. Head-locked sources go through the
+    /// same rule. A source at the listener's own position has no direction;
+    /// the renderer keeps the one it had, which a single frame does not know,
+    /// so this places it straight ahead, the renderer's own starting direction.
     pub fn place(&self, [x, y, z]: [f32; 3]) -> [f32; 3] {
         let relative = [-f64::from(z), -f64::from(x), f64::from(y)];
+        let relative = match self.metres_per_unit {
+            Some(_) => relative,
+            None => {
+                std::array::from_fn(|axis| relative[axis] * self.wall_reach(axis, relative[axis]))
+            }
+        };
         let length = norm(relative);
         let direction = if length > DIRECTION_EPSILON {
             relative.map(|value| value / length)
         } else {
             [1.0, 0.0, 0.0]
         };
-        let requested = length * self.metres_per_unit;
+        let requested = self
+            .metres_per_unit
+            .map_or(length, |metres| length * metres);
         let mut maximum = f64::INFINITY;
         for (axis, component) in direction.into_iter().enumerate() {
             if component > DIRECTION_EPSILON {
@@ -161,6 +172,17 @@ impl RoomView {
         self.world(std::array::from_fn(|axis| {
             self.listener[axis] + direction[axis] * distance
         }))
+    }
+
+    /// How far the listener can reach along one room axis, towards its far
+    /// wall for a non-negative `sign` and its near wall otherwise, before the
+    /// boundary clearance: one unit of automatic mapping.
+    fn wall_reach(&self, axis: usize, sign: f64) -> f64 {
+        if sign >= 0.0 {
+            self.dimensions[axis] - self.clearance - self.listener[axis]
+        } else {
+            self.listener[axis] - self.clearance
+        }
     }
 
     /// A surface's four corners, in world coordinates, going round its edge.
@@ -339,15 +361,20 @@ impl RoomView {
     /// leaves the volume a source can sound in. That volume is the room less
     /// the boundary clearance: the listener is inside it and it is convex, so a
     /// point in it is on an unobstructed ray and sounds where it is asked to.
+    /// The automatic mapping makes the unit box that volume exactly.
     ///
     /// The minimum distance is not drawn: it only matters at a scene unit
     /// shorter than itself, where the whole box shrinks into the listener.
     pub fn unit_box(&self) -> Vec<BoxSegment> {
-        let half = self.metres_per_unit;
         let corner = |index: usize| -> [f64; 3] {
             std::array::from_fn(|axis| {
                 let sign = if index >> axis & 1 == 1 { 1.0 } else { -1.0 };
-                self.listener[axis] + sign * half
+                match self.metres_per_unit {
+                    Some(half) => self.listener[axis] + sign * half,
+                    // On the clearance itself, not a rounding either side of it.
+                    None if sign > 0.0 => self.dimensions[axis] - self.clearance,
+                    None => self.clearance,
+                }
             })
         };
         let low = [self.clearance; 3];
@@ -463,7 +490,7 @@ mod tests {
     }
 
     fn view(metres_per_unit: f64) -> RoomView {
-        RoomView::new(&reference(), metres_per_unit)
+        RoomView::new(&reference(), Some(metres_per_unit))
     }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
@@ -515,7 +542,7 @@ mod tests {
         // Overhead clears the ceiling at 1.5 m and meets it at 2.1 m.
         assert!(close(view.place([0.0, 1.0, 0.0]), [0.0, 1.5 * k(), 0.0]));
         assert!(close(
-            RoomView::new(&reference(), 2.1).place([0.0, 1.0, 0.0]),
+            RoomView::new(&reference(), Some(2.1)).place([0.0, 1.0, 0.0]),
             [0.0, 1.85 * k(), 0.0]
         ));
     }
@@ -582,7 +609,7 @@ mod tests {
         let mut bare = reference();
         bare.absorption[1] = [0.0; 8];
         bare.absorption[2] = [0.2; 8];
-        let bare = RoomView::new(&bare, 1.5);
+        let bare = RoomView::new(&bare, Some(1.5));
         assert!(bare.panels(Surface::Front).is_empty());
         let strip = bare.panels(Surface::Right)[0];
         assert!((strip.size[2] - 0.6 * 0.2 * k()).abs() < 1e-5);
@@ -673,7 +700,7 @@ mod tests {
         // A listening position half a metre up still leaves room for the seat.
         let mut low = reference();
         low.listener[2] = 0.5;
-        let low = RoomView::new(&low, 1.5);
+        let low = RoomView::new(&low, Some(1.5));
         let stance = low.stance();
         assert!((stance.unit - narrow(0.5 / 24.0) * k()).abs() < 1e-7);
         let seat = stance.seat(low.floor_y());
@@ -705,5 +732,34 @@ mod tests {
         // At 1 m the whole box is inside.
         assert!(view(1.0).unit_box().iter().all(|segment| segment.reachable));
         assert_eq!(view(1.0).unit_box().len(), 12);
+    }
+
+    /// `MacinRender`'s own worked example (`ROOM_COORDINATE_MAPPING.md`): in
+    /// the reference room, automatic mapping puts ADM `(0, 1, 0)` 3.45 m in
+    /// front of the listener and `(0, 0.5, 0)` 1.725 m.
+    #[test]
+    fn automatic_mapping_reaches_each_wall_on_its_own_axis() {
+        let auto = RoomView::new(&reference(), None);
+        assert!(close(auto.place([0.0, 0.0, -1.0]), [0.0, 0.0, -3.45 * k()]));
+        assert!(close(
+            auto.place([0.0, 0.0, -0.5]),
+            [0.0, 0.0, -1.725 * k()]
+        ));
+        // Behind, overhead and to the right reach their own walls.
+        assert!(close(auto.place([0.0, 0.0, 1.0]), [0.0, 0.0, 3.25 * k()]));
+        assert!(close(auto.place([0.0, 1.0, 0.0]), [0.0, 1.85 * k(), 0.0]));
+        assert!(close(auto.place([1.0, 0.0, 0.0]), [2.85 * k(), 0.0, 0.0]));
+        // The axes map independently, so a diagonal lands in the corner.
+        assert!(close(
+            auto.place([1.0, 0.0, -1.0]),
+            [2.85 * k(), 0.0, -3.45 * k()]
+        ));
+        // Past ±1 the walls still hold the source on its own ray.
+        let far = auto.place([0.0, 0.0, -2.0]);
+        assert!(close(far, [0.0, 0.0, -3.45 * k()]), "{far:?}");
+        // The unit box is the reachable room, all of it.
+        let segments = auto.unit_box();
+        assert_eq!(segments.len(), 12);
+        assert!(segments.iter().all(|segment| segment.reachable));
     }
 }

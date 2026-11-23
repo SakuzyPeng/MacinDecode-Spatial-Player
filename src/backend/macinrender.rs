@@ -116,6 +116,14 @@ fn session_renderer(renderer: &native::RendererSettings) -> native::RendererSett
     native
 }
 
+/// What a room session fixes when it is created: everything but the room
+/// package, which a running session switches. `None` renders no room.
+fn room_session(renderer: &native::RendererSettings) -> Option<native::RoomSettings> {
+    let mut room = renderer.room.clone().filter(|_| renderer.binaural)?;
+    room.manifest.clear();
+    Some(room)
+}
+
 fn create_session(config: &native::Config) -> Result<native::Session, String> {
     let mut native = config.clone();
     native.renderer = session_renderer(&config.renderer);
@@ -152,6 +160,14 @@ pub(super) fn validate_source(
         return Err(blocker.into());
     }
     let renderer = settings.renderer();
+    if renderer.room.is_some() && config.sample_rate != 48_000 {
+        // The room renders at its package's rate and resamples nothing; every
+        // room the player can output to plays through a 48 kHz stream.
+        return Err(format!(
+            "The room renderer plays 48 kHz programmes; this one is {} Hz. Use SAF HRTF for it",
+            config.sample_rate
+        ));
+    }
     renderer_lfes(&config.scene_signature, &renderer)?;
     if renderer.speaker_renderer == native::SpeakerRenderer::TripleBalance
         && !config.scene_signature.lfe_element_ids().is_empty()
@@ -303,9 +319,10 @@ impl Runtime {
         reader: SceneQueueReader,
     ) -> bool {
         let format = native_config(settings, config.sample_rate, &config.output_device);
-        // A held SAF session has the same native format as a room selection
-        // would today, so reusing it would play SAF HRTF under the room label.
+        // The room package itself follows the settings through `switch`, the
+        // way the SOFA does; what the room session fixed has to match.
         if settings.playback_blocker().is_some()
+            || room_session(&self.format.renderer) != room_session(&format.renderer)
             || self.format.input_rate != format.input_rate
             || self.format.output != format.output
             || self.format.device_id != format.device_id
@@ -1382,6 +1399,7 @@ impl DeviceCatalog {
                             layout: layout.core_id().into(),
                             sofa: String::new(),
                             split_lfe: false,
+                            room: None,
                         },
                         48_000,
                     )
@@ -1605,6 +1623,42 @@ mod tests {
         assert!(validate_source(&settings, &config).is_ok());
         settings.split_lfe = false;
         assert!(validate_source(&settings, &config).is_ok());
+    }
+
+    #[test]
+    fn the_room_renderer_takes_a_chosen_room_at_48_khz_only() {
+        let frame = block(0, 32);
+        let config = |rate| {
+            OutputStreamConfig::new(
+                1,
+                1,
+                0,
+                rate,
+                SceneSignature::from_block(&frame),
+                OutputDeviceSelection::SystemDefault,
+            )
+            .unwrap()
+        };
+        let mut settings = OutputSettings {
+            mode: SpatialBackendKind::SafBinaural,
+            binaural_renderer: super::super::BinauralRenderer::Room,
+            ..Default::default()
+        };
+        assert!(
+            validate_source(&settings, &config(48_000))
+                .unwrap_err()
+                .contains("room package")
+        );
+        settings.room = "rooms/studio-a/room.json".into();
+        assert!(validate_source(&settings, &config(48_000)).is_ok());
+        assert!(
+            validate_source(&settings, &config(44_100))
+                .unwrap_err()
+                .contains("48 kHz")
+        );
+        // SAF HRTF resamples, as before.
+        settings.binaural_renderer = super::super::BinauralRenderer::SafHrtf;
+        assert!(validate_source(&settings, &config(44_100)).is_ok());
     }
 
     #[test]
