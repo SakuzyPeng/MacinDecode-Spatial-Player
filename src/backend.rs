@@ -189,7 +189,7 @@ enum OutputClock {
     Preview,
 }
 
-/// What the headphone compensation is doing, in player-owned terms.
+/// What the headphone compensation is doing to one ear, in player-owned terms.
 ///
 /// The renderer's own status struct stays behind `backend/macinrender.rs`, the
 /// same way `windows` and `raw` types do: this crosses into the UI, which is
@@ -245,33 +245,54 @@ impl HptfRequest {
         // reads the file itself — through the v1.39 entrypoint that does not
         // hold the output's controls while it does. Turning them back to zero
         // therefore restores exactly the path a build without knobs takes.
-        if self.adjustment.is_flat() || self.settings.profile.is_empty() {
+        if self.adjustment.is_flat() || self.settings.is_off() {
             return control.set_hptf(&self.settings, revision);
         }
-        let text =
-            std::fs::read_to_string(&self.settings.profile).map_err(|error| error.to_string())?;
-        let profile = crate::hptf_profile::Profile::parse(&text)?.with(self.adjustment)?;
-        control.set_hptf_parameters(
-            &macindecode_macinrender::HptfProfile {
-                preamp_db: profile.preamp_db,
-                bands: profile
-                    .cascade()
-                    .iter()
-                    .map(|band| macindecode_macinrender::HptfBand {
-                        kind: hptf_band_kind(band.kind),
-                        // Everything this side keeps is the cascade itself; a
-                        // band that was switched off never got this far.
-                        enabled: true,
-                        fc_hz: band.fc,
-                        gain_db: band.gain_db,
-                        q: band.q,
-                    })
-                    .collect(),
-            },
-            self.settings.auto_trim,
-            revision,
-        )
+        let left = tuned_profile(&self.settings.profile, self.adjustment)?;
+        match &self.settings.right {
+            None => control.set_hptf_parameters(&left, self.settings.auto_trim, revision),
+            // The knobs are the listener's, not the headphone's, so both ears
+            // take them — an ear with no profile of its own included.
+            Some(right) => control.set_hptf_stereo_parameters(
+                &left,
+                &tuned_profile(right, self.adjustment)?,
+                self.settings.auto_trim,
+                revision,
+            ),
+        }
     }
+}
+
+/// One ear's profile with the knobs appended, in the renderer's terms. An
+/// empty path is an ear with no profile, which still takes the knobs.
+#[cfg(macinrender_output)]
+fn tuned_profile(
+    path: &str,
+    adjustment: crate::hptf_profile::Adjustment,
+) -> Result<macindecode_macinrender::HptfProfile, String> {
+    let base = if path.is_empty() {
+        crate::hptf_profile::Profile::of_bands(0.0, Vec::new())
+    } else {
+        let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+        crate::hptf_profile::Profile::parse(&text)?
+    };
+    let profile = base.with(adjustment)?;
+    Ok(macindecode_macinrender::HptfProfile {
+        preamp_db: profile.preamp_db,
+        bands: profile
+            .cascade()
+            .iter()
+            .map(|band| macindecode_macinrender::HptfBand {
+                kind: hptf_band_kind(band.kind),
+                // Everything this side keeps is the cascade itself; a band that
+                // was switched off never got this far.
+                enabled: true,
+                fc_hz: band.fc,
+                gain_db: band.gain_db,
+                q: band.q,
+            })
+            .collect(),
+    })
 }
 
 /// The two halves of one mapping, kept adjacent so they cannot drift apart.

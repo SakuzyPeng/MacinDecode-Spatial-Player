@@ -70,8 +70,8 @@ pub struct Catalog {
     pub message: String,
     pub started: bool,
     worker: Option<JoinHandle<()>>,
-    receiver: mpsc::Receiver<Result<(Vec<Entry>, Option<PathBuf>)>>,
-    sender: mpsc::Sender<Result<(Vec<Entry>, Option<PathBuf>)>>,
+    receiver: mpsc::Receiver<Result<(Vec<Entry>, Vec<PathBuf>)>>,
+    sender: mpsc::Sender<Result<(Vec<Entry>, Vec<PathBuf>)>>,
     cancelled: Arc<AtomicBool>,
 }
 impl Catalog {
@@ -92,7 +92,9 @@ impl Catalog {
     pub fn busy(&self) -> bool {
         self.worker.is_some()
     }
-    pub fn refresh(&mut self, import: Option<PathBuf>, context: &eframe::egui::Context) {
+    /// Rescan the folder, importing `imports` into it first, in order. The
+    /// imported copies come back from [`Self::poll`] in the same order.
+    pub fn refresh(&mut self, imports: Vec<PathBuf>, context: &eframe::egui::Context) {
         if self.busy() {
             return;
         }
@@ -110,9 +112,10 @@ impl Catalog {
             .name(format!("{}-catalog", kind.slug))
             .spawn(move || {
                 let result = (|| {
-                    let imported = import
-                        .map(|source| import_file(kind, &root, &source, &cancelled))
-                        .transpose()?;
+                    let imported = imports
+                        .iter()
+                        .map(|source| import_file(kind, &root, source, &cancelled))
+                        .collect::<Result<Vec<_>>>()?;
                     Ok((scan(kind, &root, previous, &cancelled)?, imported))
                 })();
                 let _ = sender.send(result);
@@ -122,7 +125,7 @@ impl Catalog {
             Err(error) => self.message = error.to_string(),
         }
     }
-    pub fn poll(&mut self) -> Option<(Vec<Entry>, Option<PathBuf>)> {
+    pub fn poll(&mut self) -> Option<(Vec<Entry>, Vec<PathBuf>)> {
         let result = self.receiver.try_recv().ok()?;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

@@ -106,8 +106,17 @@ pub struct PlayerApp {
     room_switch: scene3d::switch::RoomSwitch,
     /// Screen edits not yet applied; `None` when the page shows the settings.
     room_screen_draft: Option<crate::backend::ScreenSettings>,
-    /// The drawn profile, read once per path and design rate.
+    /// The drawn profile, read once per path and design rate: both ears', or
+    /// the left one's while the ears are separate.
     hptf_drawing: Option<HptfDrawing>,
+    /// The right ear's, while the ears are separate.
+    hptf_drawing_right: Option<HptfDrawing>,
+    /// Which ear the profile list chooses for while the ears are separate.
+    hptf_ear: Ear,
+    /// For each file the running import brings in, the ears it is for. Empty
+    /// sends every file to the ear the list chooses for, which is what the
+    /// file picker wants; a save that writes one file per ear says which.
+    hptf_targets: Vec<Vec<Ear>>,
     /// The profile under the pointer, cached the same way so that sweeping the
     /// folder re-reads a file only when the row changes.
     hptf_ghost: Option<HptfDrawing>,
@@ -949,6 +958,9 @@ impl PlayerApp {
             room_view_enabled: true,
             room_switch: scene3d::switch::RoomSwitch::default(),
             hptf_drawing: None,
+            hptf_drawing_right: None,
+            hptf_ear: Ear::Left,
+            hptf_targets: Vec::new(),
             hptf_ghost: None,
             hptf_saving: None,
             sofa_shown: None,
@@ -1668,7 +1680,7 @@ impl PlayerApp {
         };
         self.sofa_picker = None;
         if let Some(path) = path {
-            self.sofa.refresh(Some(path.path().to_path_buf()), context);
+            self.sofa.refresh(vec![path.path().to_path_buf()], context);
         }
     }
 
@@ -1682,16 +1694,16 @@ impl PlayerApp {
     fn poll_file_catalogs(&mut self, context: &egui::Context) {
         if self.library.ready && !self.sofa.started {
             self.sofa.files = self.library.sofa_index.take().unwrap_or_default();
-            self.sofa.refresh(None, context);
+            self.sofa.refresh(Vec::new(), context);
         }
         if self.library.ready && !self.hptf.started {
             self.hptf.files = self.library.hptf_index.take().unwrap_or_default();
-            self.hptf.refresh(None, context);
+            self.hptf.refresh(Vec::new(), context);
         }
         if let Some((files, imported)) = self.sofa.poll() {
             self.library
                 .save_file_index(crate::file_catalog::SOFA, files);
-            if let Some(path) = imported {
+            if let Some(path) = imported.first() {
                 if let Some(path) = path.to_str() {
                     let mut settings = self.output.settings().clone();
                     path.clone_into(&mut settings.sofa);
@@ -1706,19 +1718,31 @@ impl PlayerApp {
         // The catalog runs one operation at a time. Release that operation's
         // staging directory when it ends, including a failed import or worker
         // spawn, so a later ordinary import cannot inherit its save marker.
-        let saved = !self.hptf.busy() && self.hptf_saving.take().is_some();
+        let finished = !self.hptf.busy();
+        let saved = finished && self.hptf_saving.take().is_some();
+        let targets = if finished {
+            std::mem::take(&mut self.hptf_targets)
+        } else {
+            Vec::new()
+        };
         if let Some((files, imported)) = hptf_update {
             self.library
                 .save_file_index(crate::file_catalog::HPTF, files);
             // A save arrives here like any other import. Taking the staging
             // directory back is what says this one was a save, and the knobs
             // have to come off in the same settings change that selects the
-            // file they are now baked into — otherwise a frame of the new
-            // profile would run with the adjustment applied twice.
-            if let Some(path) = imported {
-                if let Some(path) = path.to_str() {
-                    let mut settings = self.output.settings().clone();
-                    path.clone_into(&mut settings.hptf);
+            // files they are now baked into — otherwise a frame of the new
+            // profiles would run with the adjustment applied twice.
+            if !imported.is_empty() {
+                let mut settings = self.output.settings().clone();
+                let edited = vec![self.hptf_edited(&settings)];
+                let paths: Option<Vec<&str>> = imported.iter().map(|path| path.to_str()).collect();
+                if let Some(paths) = paths {
+                    for (index, path) in paths.into_iter().enumerate() {
+                        for &ear in targets.get(index).unwrap_or(&edited) {
+                            path.clone_into(ear.profile_mut(&mut settings));
+                        }
+                    }
                     if saved {
                         settings.hptf_bass_db = 0.0;
                         settings.hptf_tilt_db = 0.0;
@@ -1745,7 +1769,7 @@ impl PlayerApp {
         };
         self.hptf_picker = None;
         if let Some(path) = path {
-            self.hptf.refresh(Some(path.path().to_path_buf()), context);
+            self.hptf.refresh(vec![path.path().to_path_buf()], context);
         }
     }
 
@@ -1984,7 +2008,7 @@ impl PlayerApp {
                 settings.sofa.clear();
             }
             if ui.button("Refresh SOFA folder").clicked() {
-                self.sofa.refresh(None, context);
+                self.sofa.refresh(Vec::new(), context);
             }
         });
         ui.label(self.sofa.root.display().to_string());
@@ -1992,7 +2016,7 @@ impl PlayerApp {
         let (clicked, _) = draw_catalog_files(
             ui,
             &self.sofa,
-            self.output.active_sofa(),
+            self.output.active_sofa().as_slice(),
             Path::new(&settings.sofa),
             &mut self.sofa_shown,
         );
@@ -2020,7 +2044,17 @@ impl PlayerApp {
         self.draw_hptf_response(ui, settings, hovered.as_deref(), save_requested, context);
     }
 
-    /// Which profile, out of the managed folder.
+    /// Which ear the profile list chooses for: the left one, which is also
+    /// both ears' while they share a profile, or whichever the listener picked.
+    fn hptf_edited(&self, settings: &OutputSettings) -> Ear {
+        if settings.hptf_separate_ears {
+            self.hptf_ear
+        } else {
+            Ear::Left
+        }
+    }
+
+    /// Which profile, out of the managed folder — or which two.
     ///
     /// Reports the row under the pointer, which is the profile the response
     /// half draws as a ghost behind the chosen one.
@@ -2030,18 +2064,45 @@ impl PlayerApp {
         settings: &mut OutputSettings,
         context: &egui::Context,
     ) -> Option<String> {
-        // Name the file and nothing else. A ParametricEQ profile
-        // carries no target or measurement provenance, so the
-        // player cannot tell what a given one equalises towards
-        // and must not imply that it knows.
-        ui.label(if settings.hptf.is_empty() {
-            "Profile: none".to_owned()
+        let was_separate = settings.hptf_separate_ears;
+        ui.checkbox(&mut settings.hptf_separate_ears, "Separate ears")
+            .on_hover_text(
+                "Give each ear its own profile, such as one measured on each side. Bass, Tilt and the trim stay common to both ears.",
+            );
+        // Separating starts from what both ears were already running, so the
+        // switch itself changes nothing that can be heard.
+        if settings.hptf_separate_ears && !was_separate && settings.hptf_right.is_empty() {
+            settings.hptf_right.clone_from(&settings.hptf);
+        }
+        let edited = self.hptf_edited(settings);
+        // Name the file and nothing else. A ParametricEQ profile carries no
+        // target or measurement provenance, so the player cannot tell what a
+        // given one equalises towards and must not imply that it knows.
+        let provenance = "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.";
+        if settings.hptf_separate_ears {
+            ui.horizontal(|ui| {
+                for ear in Ear::BOTH {
+                    let path = ear.profile(settings);
+                    ui.selectable_value(
+                        &mut self.hptf_ear,
+                        ear,
+                        RichText::new(format!("{}: {}", ear.label(), profile_or_none(path)))
+                            .color(ear.colour()),
+                    )
+                    .on_hover_text(format!(
+                        "Choose the {} ear's profile from the list below. {provenance}",
+                        ear.label().to_lowercase()
+                    ));
+                }
+            });
         } else {
-            format!("Profile: {}", profile_name(&settings.hptf))
-        })
-        .on_hover_text(
-            "An AutoEq ParametricEQ profile, applied to the headphone feed exactly as written. Which target it equalises towards is decided by whoever generated it and is not recorded in the file; pair it with the reference field your SOFA was equalised to.",
-        );
+            ui.label(if settings.hptf.is_empty() {
+                "Profile: none".to_owned()
+            } else {
+                format!("Profile: {}", profile_name(&settings.hptf))
+            })
+            .on_hover_text(provenance);
+        }
         ui.horizontal(|ui| {
             if ui.button("Choose AutoEq profile…").clicked() {
                 self.hptf_picker = Some(Box::pin(
@@ -2052,31 +2113,41 @@ impl PlayerApp {
                 ));
                 context.request_repaint();
             }
-            if ui.button("Turn off").clicked() {
-                settings.hptf.clear();
+            if ui
+                .button("Turn off")
+                .on_hover_text(if settings.hptf_separate_ears {
+                    "Leave this ear without a profile of its own."
+                } else {
+                    "Stop compensating the headphones."
+                })
+                .clicked()
+            {
+                edited.profile_mut(settings).clear();
             }
             if ui.button("Refresh profile folder").clicked() {
                 // The curves are read from the files this
                 // re-reads, so drop them with it rather than
                 // let an edited profile keep its old picture.
                 self.hptf_drawing = None;
+                self.hptf_drawing_right = None;
                 self.hptf_ghost = None;
-                self.hptf.refresh(None, context);
+                self.hptf.refresh(Vec::new(), context);
             }
         });
         ui.label(self.hptf.root.display().to_string());
         ui.label(&self.hptf.message);
+        let active = self.output.active_hptf();
         let (clicked, hovered) = draw_catalog_files(
             ui,
             &self.hptf,
-            self.output.active_hptf(),
-            Path::new(&settings.hptf),
+            active.as_ref().map_or(&[], |ears| ears.as_slice()),
+            Path::new(edited.profile(settings)),
             &mut self.hptf_shown,
         );
         let hovered = hovered.and_then(|path| path.to_str().map(str::to_owned));
         if let Some(full_path) = clicked {
             if let Some(path) = full_path.to_str() {
-                path.clone_into(&mut settings.hptf);
+                path.clone_into(edited.profile_mut(settings));
             } else {
                 self.audio_settings_error =
                     Some("This renderer requires a Unicode profile path".into());
@@ -2085,9 +2156,13 @@ impl PlayerApp {
         hovered
     }
 
-    /// Everything that follows from the profile and the knobs: the curve, the
-    /// lines drawn behind it, whatever disagrees about it, and what the
-    /// renderer reports about the one it is actually running.
+    /// Everything that follows from the profiles and the knobs: the curves,
+    /// the lines drawn behind them, whatever disagrees about them, and what the
+    /// renderer reports about the ones it is actually running.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one page reads top to bottom: curves, legends, checks, readout, save"
+    )]
     fn draw_hptf_response(
         &mut self,
         ui: &mut egui::Ui,
@@ -2097,19 +2172,42 @@ impl PlayerApp {
         context: &egui::Context,
     ) {
         let adjustment = settings.hptf_adjustment();
-        let hptf = self.output.hptf_readout();
-        // Running means this profile *and* these knobs: a
+        let readouts = self.output.hptf_readout();
+        let separate = settings.hptf_separate_ears;
+        let ears = settings.hptf_ears();
+        // Running means these profiles *and* these knobs: a
         // slider that has moved but not yet reached the
         // audio must not be called applied.
-        let running = self.output.active_hptf() == Some(settings.hptf.as_str())
+        let running = self.output.active_hptf() == Some(ears)
             && self.output.active_hptf_adjustment() == adjustment;
         // The renderer designs at the rate its output runs;
         // 48 kHz is what a Scene output is created with, so
         // that is the curve to draw before one exists.
-        let rate = if hptf.rate == 0 { 48_000 } else { hptf.rate };
-        let profile = settings.hptf.clone();
-        let ghost_path = hptf_ghost(hovered, &profile);
-        let drawn = hptf_curve(&mut self.hptf_drawing, &profile, rate, adjustment);
+        let rate = readouts
+            .iter()
+            .map(|readout| readout.rate)
+            .find(|&rate| rate != 0)
+            .unwrap_or(48_000);
+        // The renderer trims both ears by one amount.
+        let trim = if running {
+            readouts[0].auto_trim_db
+        } else {
+            0.0
+        };
+        let edited = self.hptf_edited(settings);
+        let ghost_path = hptf_ghost(hovered, edited.profile(settings));
+        let left = hptf_curve(&mut self.hptf_drawing, ears[0], rate, adjustment);
+        let right = if separate {
+            hptf_curve(&mut self.hptf_drawing_right, ears[1], rate, adjustment)
+        } else {
+            self.hptf_drawing_right = None;
+            None
+        };
+        let drawings: Vec<(Ear, Option<&HptfDrawing>)> = if separate {
+            vec![(Ear::Left, left), (Ear::Right, right)]
+        } else {
+            vec![(Ear::Left, left)]
+        };
         // A ghost answers "what does that file do", so it is
         // drawn as written — the knobs belong to the chain,
         // not to the file being pointed at.
@@ -2119,16 +2217,28 @@ impl PlayerApp {
             rate,
             crate::hptf_profile::Adjustment::default(),
         );
-        // The drawn line is what the output does, so it takes
-        // the renderer's extra trim — but only while it is
-        // this profile that is running. A ghost never is one,
-        // so a ghost is drawn the way its own file reads.
-        let drawn_curve = drawn
-            .and_then(|drawing| drawing.running().as_ref().ok())
-            .map(|curve| curve.with_output_trim(if running { hptf.auto_trim_db } else { 0.0 }));
-        let reference_curve = drawn.and_then(HptfDrawing::reference);
+        // The drawn lines are what the output does, so they take
+        // the renderer's extra trim — but only while it is these
+        // profiles that are running. A ghost never is one, so a
+        // ghost is drawn the way its own file reads.
+        let traces: Vec<HptfTrace<'_>> = drawings
+            .iter()
+            .map(|&(ear, drawing)| HptfTrace {
+                curve: drawing
+                    .and_then(|drawing| drawing.running().as_ref().ok())
+                    .map(|curve| curve.with_output_trim(trim)),
+                reference: drawing.and_then(HptfDrawing::reference),
+                colour: if separate {
+                    ear.colour()
+                } else {
+                    theme::ACCENT
+                },
+            })
+            .collect();
         let ghost_curve = ghost.and_then(|drawing| drawing.curve.as_ref().ok());
-        if drawn_curve.is_some() {
+        let any_curve = traces.iter().any(|trace| trace.curve.is_some());
+        let any_reference = traces.iter().any(|trace| trace.reference.is_some());
+        if any_curve {
             ui.label(if running {
                 "Applied response"
             } else if settings.hptf_auto_trim {
@@ -2137,22 +2247,35 @@ impl PlayerApp {
                 "Profile response"
             });
         }
-        if drawn_curve.is_some() || reference_curve.is_some() || ghost_curve.is_some() {
-            draw_hptf_curve(ui, drawn_curve.as_ref(), reference_curve, ghost_curve);
+        if any_curve || any_reference || ghost_curve.is_some() {
+            draw_hptf_curve(ui, &traces, ghost_curve);
         }
-        if reference_curve.is_some() {
+        if separate && any_curve {
+            ui.horizontal_wrapped(|ui| {
+                for (ear, path) in Ear::BOTH.into_iter().zip(ears) {
+                    ui.colored_label(
+                        ear.colour(),
+                        format!("{} · {}", ear.label(), profile_or_none(path)),
+                    );
+                }
+            });
+        }
+        if any_reference {
             ui.colored_label(
                 theme::MUTED,
                 "Dashed: the profile alone, without the adjustment.",
             );
         }
         if let Some(path) = ghost_path {
+            let edited_drawn = traces
+                .get(if separate { edited as usize } else { 0 })
+                .is_some_and(|trace| trace.curve.is_some());
             draw_ghost_legend(
                 ui,
                 ghost,
                 path,
-                drawn_curve.is_some().then_some(profile.as_str()),
-                running && hptf.auto_trim_db != 0.0,
+                edited_drawn.then_some(edited.profile(settings)),
+                running && trim != 0.0,
             );
         }
         // A profile nobody is pointing at gets no second
@@ -2161,42 +2284,103 @@ impl PlayerApp {
         if let Some(note) = ghost.and_then(|drawing| drawing.disagreement.as_deref()) {
             ui.colored_label(theme::MUTED, note);
         }
-        if let Some(Err(error)) = drawn.map(HptfDrawing::running) {
-            ui.colored_label(theme::WARNING, format!("Cannot read this profile: {error}"));
-        }
-        // The parse comparison wins over the running one: it
-        // names the band, it does not wait for playback, and
-        // when the two parses differ the running comparison
-        // would only report the same fault as a moved peak.
-        if let Some(note) = drawn.and_then(|drawing| drawing.disagreement.as_deref()) {
-            ui.colored_label(theme::WARNING, note);
-        } else if running
-            && let Some(curve) = &drawn_curve
-            && let Some(note) = hptf_disagreement(curve, &hptf)
-        {
-            ui.colored_label(theme::WARNING, note);
+        // Each ear's notes, named when there are two to tell apart.
+        let named = |ear: Ear, text: String| {
+            if separate {
+                format!("{}: {text}", ear.label())
+            } else {
+                text
+            }
+        };
+        for (&(ear, drawing), trace) in drawings.iter().zip(&traces) {
+            if let Some(Err(error)) = drawing.map(HptfDrawing::running) {
+                ui.colored_label(
+                    theme::WARNING,
+                    named(ear, format!("Cannot read this profile: {error}")),
+                );
+            }
+            // The parse comparison wins over the running one: it
+            // names the band, it does not wait for playback, and
+            // when the two parses differ the running comparison
+            // would only report the same fault as a moved peak.
+            if let Some(note) = drawing.and_then(|drawing| drawing.disagreement.as_deref()) {
+                ui.colored_label(theme::WARNING, named(ear, note.to_owned()));
+            } else if running
+                && let Some(curve) = &trace.curve
+                && let Some(note) = hptf_disagreement(curve, &readouts[ear as usize])
+            {
+                ui.colored_label(theme::WARNING, named(ear, note));
+            }
         }
         if running {
-            draw_hptf_readout(ui, &hptf, adjustment);
-        } else if !settings.hptf.is_empty() {
+            for &(ear, _) in &drawings {
+                draw_hptf_readout(
+                    ui,
+                    &readouts[ear as usize],
+                    adjustment,
+                    separate.then(|| (ear, ears[ear as usize].is_empty())),
+                );
+            }
+        } else if settings.hptf_chosen() {
             ui.label("Selected; not yet running.");
         }
         if save_requested {
-            let staged = drawn
-                .ok_or_else(|| "no profile is selected".to_owned())
-                .and_then(|drawing| drawing.profile.as_ref().map_err(Clone::clone))
-                .and_then(|base| base.with(adjustment))
-                .and_then(|tuned| stage_tuned_profile(&tuned, &profile, adjustment));
-            match staged {
-                Ok((directory, file)) => {
-                    self.hptf_saving = Some(directory);
-                    self.hptf.refresh(Some(file), context);
+            match self.stage_tuned_hptf(settings, adjustment) {
+                Ok(staged) => {
+                    self.hptf_saving = Some(staged.directory);
+                    self.hptf_targets = staged.targets;
+                    self.hptf.refresh(staged.files, context);
                 }
                 Err(error) => {
                     self.audio_settings_error = Some(format!("Cannot save this profile: {error}"));
                 }
             }
         }
+    }
+
+    /// The profiles Save as profile… writes, and the ears each one is for:
+    /// one while the ears share a profile or the same file, one per ear
+    /// otherwise, each with the knobs baked in. An ear without a profile
+    /// takes the knobs as a profile of their own, because it was running them.
+    fn stage_tuned_hptf(
+        &self,
+        settings: &OutputSettings,
+        adjustment: crate::hptf_profile::Adjustment,
+    ) -> Result<StagedSave, String> {
+        let [left, right] = settings.hptf_ears();
+        let tuned = |drawing: Option<&HptfDrawing>, path: &str| {
+            if path.is_empty() {
+                crate::hptf_profile::Profile::of_bands(0.0, Vec::new()).with(adjustment)
+            } else {
+                drawing
+                    .filter(|drawing| drawing.path == path)
+                    .ok_or_else(|| "the profile has not been read yet".to_owned())
+                    .and_then(|drawing| drawing.profile.clone())
+                    .and_then(|base| base.with(adjustment))
+            }
+        };
+        let left_tuned = tuned(self.hptf_drawing.as_ref(), left)?;
+        if !settings.hptf_separate_ears || left == right {
+            let (directory, files) = stage_tuned_profiles(&[(&left_tuned, left)], adjustment)?;
+            let ears = if settings.hptf_separate_ears {
+                Ear::BOTH.to_vec()
+            } else {
+                vec![Ear::Left]
+            };
+            return Ok(StagedSave {
+                directory,
+                files,
+                targets: vec![ears],
+            });
+        }
+        let right_tuned = tuned(self.hptf_drawing_right.as_ref(), right)?;
+        let (directory, files) =
+            stage_tuned_profiles(&[(&left_tuned, left), (&right_tuned, right)], adjustment)?;
+        Ok(StagedSave {
+            directory,
+            files,
+            targets: vec![vec![Ear::Left], vec![Ear::Right]],
+        })
     }
 
     /// The meter bank: one row per object, beside the scene rather than in it.
@@ -3918,7 +4102,7 @@ fn draw_hptf_knobs(ui: &mut egui::Ui, settings: &mut OutputSettings) -> bool {
     // decision in an inspection tool; two named,
     // checkable controls do not.
     let mut save_requested = false;
-    ui.add_enabled_ui(!settings.hptf.is_empty(), |ui| {
+    ui.add_enabled_ui(settings.hptf_chosen(), |ui| {
         ui.add(
             egui::Slider::new(
                 &mut settings.hptf_bass_db,
@@ -3959,7 +4143,7 @@ fn draw_hptf_knobs(ui: &mut egui::Ui, settings: &mut OutputSettings) -> bool {
             if ui
                 .add_enabled(moved, egui::Button::new("Save as profile…"))
                 .on_hover_text(
-                    "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
+                    "Writes the profile with the adjustment baked in into the hptf/ folder, selects it and returns the knobs to rest — one per ear while the ears are separate. A setting worth keeping becomes an ordinary, portable profile rather than a number in settings.json.",
                 )
                 .clicked()
             {
@@ -4005,18 +4189,25 @@ fn draw_ghost_legend(
 
 /// What the renderer reports about the profile it is running — the only
 /// numbers on the page that are its rather than ours.
+///
+/// `ear` names the ear while each has its own, and says whether that ear has
+/// no profile of its own — it may still be running the knobs and the trim.
 fn draw_hptf_readout(
     ui: &mut egui::Ui,
     hptf: &crate::backend::HptfReadout,
     adjustment: crate::hptf_profile::Adjustment,
+    ear: Option<(Ear, bool)>,
 ) {
     // Count the adjustment apart from the file, so
     // that the file and the listener never have to
     // be told apart afterwards.
     let added = u32::try_from(adjustment.bands().len()).unwrap_or_default();
-    ui.label(format!(
-        "In use · {} · preamp {:+.1} dB{}",
-        if added == 0 {
+    let prefix = ear.map_or_else(String::new, |(ear, _)| format!("{} · ", ear.label()));
+    let text = format!(
+        "{prefix}In use · {} · preamp {:+.1} dB{}",
+        if ear.is_some_and(|(_, bare)| bare) && added == 0 {
+            "no profile".to_owned()
+        } else if added == 0 {
             format!("{} bands", hptf.bands)
         } else {
             format!(
@@ -4030,45 +4221,67 @@ fn draw_hptf_readout(
         } else {
             format!(" · trimmed {:+.1} dB", hptf.auto_trim_db)
         }
-    ));
+    );
+    match ear {
+        Some((ear, _)) => ui.colored_label(ear.colour(), text),
+        None => ui.label(text),
+    };
     if hptf.max_response_db > 0.0 {
         ui.colored_label(
             theme::WARNING,
             format!(
-                "Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
+                "{prefix}Peaks {:+.1} dB above full scale; the output ceiling will pull it back.",
                 hptf.max_response_db
             ),
         );
     }
 }
 
-/// Write a tuned profile into a staging directory for the catalog to import.
+/// Write tuned profiles into a staging directory for the catalog to import,
+/// each beside the source it was tuned from (empty for an ear that had none).
 ///
 /// The provenance goes in a comment both parsers skip. The knobs stop being
 /// separate here, and that line is the only thing that will still say so.
 ///
-/// Reports the directory alongside the file, because the file only lives as
-/// long as it does: the caller holds it until the import has read it.
-fn stage_tuned_profile(
-    tuned: &crate::hptf_profile::Profile,
-    source: &str,
+/// Reports the directory alongside the files, because the files only live as
+/// long as it does: the caller holds it until the import has read them.
+fn stage_tuned_profiles(
+    tuned: &[(&crate::hptf_profile::Profile, &str)],
     adjustment: crate::hptf_profile::Adjustment,
-) -> Result<(tempfile::TempDir, PathBuf), String> {
+) -> Result<(tempfile::TempDir, Vec<PathBuf>), String> {
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let file = directory
-        .path()
-        .join(adjusted_profile_name(source, adjustment));
-    std::fs::write(
-        &file,
-        format!(
-            "# {} with {}\n{}",
-            profile_name(source),
-            adjustment_summary(adjustment),
-            tuned.to_parametric_eq()
-        ),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok((directory, file))
+    let mut files: Vec<PathBuf> = Vec::new();
+    for &(profile, source) in tuned {
+        let mut file = directory
+            .path()
+            .join(adjusted_profile_name(source, adjustment));
+        // Two ears tuned from two files of one name would land on one file.
+        for index in 2_u32.. {
+            if !files.contains(&file) {
+                break;
+            }
+            file = directory.path().join(format!(
+                "{} {index}.txt",
+                adjusted_profile_name(source, adjustment).trim_end_matches(".txt")
+            ));
+        }
+        let origin = if source.is_empty() {
+            "No profile".to_owned()
+        } else {
+            profile_name(source)
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "# {origin} with {}\n{}",
+                adjustment_summary(adjustment),
+                profile.to_parametric_eq()
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        files.push(file);
+    }
+    Ok((directory, files))
 }
 
 /// One page of the audio settings.
@@ -4302,7 +4515,7 @@ const CATALOG_ROWS_SHOWN: f32 = 4.0;
 fn draw_catalog_files(
     ui: &mut egui::Ui,
     catalog: &crate::file_catalog::Catalog,
-    in_use: Option<&str>,
+    in_use: &[&str],
     selected: &Path,
     shown: &mut Option<PathBuf>,
 ) -> (Option<PathBuf>, Option<PathBuf>) {
@@ -4317,7 +4530,7 @@ fn draw_catalog_files(
             for file in &catalog.files {
                 let full_path = catalog.root.join(&file.path);
                 let is_selected = selected == full_path;
-                let active = in_use.is_some_and(|path| Path::new(path) == full_path);
+                let active = in_use.iter().any(|path| Path::new(path) == full_path);
                 let response = ui.add_enabled(
                     file.selectable(),
                     egui::Button::selectable(
@@ -4360,6 +4573,67 @@ fn nameplate_anchor(
             scene3d::scene::object_position(object, object.position, room),
             scene3d::params::OBJECT_EDGE,
         )),
+    }
+}
+
+/// One of the two ears a headphone profile can be chosen for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ear {
+    Left = 0,
+    Right = 1,
+}
+
+impl Ear {
+    const BOTH: [Self; 2] = [Self::Left, Self::Right];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+
+    /// The ear's line on the response plot and its name beside it. Neither
+    /// is the warning colour, and the left one is the colour a single profile
+    /// is drawn in.
+    const fn colour(self) -> egui::Color32 {
+        match self {
+            Self::Left => theme::ACCENT,
+            Self::Right => theme::SUCCESS,
+        }
+    }
+
+    /// The setting that holds this ear's profile. The left one's is also both
+    /// ears' while they share one.
+    fn profile(self, settings: &OutputSettings) -> &str {
+        match self {
+            Self::Left => &settings.hptf,
+            Self::Right => &settings.hptf_right,
+        }
+    }
+
+    fn profile_mut(self, settings: &mut OutputSettings) -> &mut String {
+        match self {
+            Self::Left => &mut settings.hptf,
+            Self::Right => &mut settings.hptf_right,
+        }
+    }
+}
+
+/// What Save as profile… staged for the catalog to import: the directory the
+/// files live in until then, the files, and for each the ears it is for.
+struct StagedSave {
+    directory: tempfile::TempDir,
+    files: Vec<PathBuf>,
+    targets: Vec<Vec<Ear>>,
+}
+
+/// A profile's name, or that there is none.
+fn profile_or_none(path: &str) -> String {
+    if path.is_empty() {
+        "none".to_owned()
+    } else {
+        profile_name(path)
     }
 }
 
@@ -4424,14 +4698,10 @@ fn adjustment_summary(adjustment: crate::hptf_profile::Adjustment) -> String {
 /// What a saved profile is called: the file it came from and what was done to
 /// it, so a month later the folder still says which is which.
 fn adjusted_profile_name(path: &str, adjustment: crate::hptf_profile::Adjustment) -> String {
-    format!(
-        "{} ({}).txt",
-        Path::new(path)
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy(),
-        adjustment_summary(adjustment)
-    )
+    let stem = Path::new(path)
+        .file_stem()
+        .map_or_else(|| "Adjustment".into(), |stem| stem.to_string_lossy());
+    format!("{stem} ({}).txt", adjustment_summary(adjustment))
 }
 
 /// The drawing for `path` at `rate`, kept in `slot` and re-read from disk only
@@ -4527,8 +4797,8 @@ fn hptf_ghost<'a>(hovered: Option<&'a str>, drawn: &str) -> Option<&'a str> {
 /// destroys. A curve that runs past either end extends the range instead — and
 /// the ghost counts, because a comparison drawn outside the frame is worse than
 /// no comparison.
-fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 3]) -> (f32, f32) {
-    let shown = || curves.into_iter().flatten();
+fn hptf_axis(curves: &[Option<&crate::hptf_profile::Curve>]) -> (f32, f32) {
+    let shown = || curves.iter().flatten();
     (
         shown().fold(3.0_f32, |top, curve| top.max(curve.max_response_db.ceil())),
         shown().fold(-12.0_f32, |bottom, curve| bottom.min(curve.floor().floor())),
@@ -4546,10 +4816,13 @@ fn hptf_axis(curves: [Option<&crate::hptf_profile::Curve>; 3]) -> (f32, f32) {
     reason = "the index is bounded by the stored curve's length, far inside \
               what f32 represents exactly"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one plot: its frame, its two axes and every line drawn over them"
+)]
 fn draw_hptf_curve(
     ui: &mut egui::Ui,
-    curve: Option<&crate::hptf_profile::Curve>,
-    reference: Option<&crate::hptf_profile::Curve>,
+    traces: &[HptfTrace<'_>],
     ghost: Option<&crate::hptf_profile::Curve>,
 ) {
     const LABELS: f32 = 13.0;
@@ -4568,7 +4841,14 @@ fn draw_hptf_curve(
     );
 
     let plot = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - LABELS));
-    let (top, bottom) = hptf_axis([ghost, reference, curve]);
+    let shown: Vec<_> = std::iter::once(ghost)
+        .chain(
+            traces
+                .iter()
+                .flat_map(|trace| [trace.reference, trace.curve.as_ref()]),
+        )
+        .collect();
+    let (top, bottom) = hptf_axis(&shown);
     let y = |db: f32| plot.top() + (top - db) / (top - bottom) * plot.height();
     let x = |hz: f64| plot.left() + crate::hptf_profile::Curve::position(hz) * plot.width();
 
@@ -4645,24 +4925,47 @@ fn draw_hptf_curve(
     // Dashed rather than another shade: the file alone is the same profile as
     // the solid line, not a different one, and a dash says "before" where a
     // third colour would say "other".
-    if let Some(reference) = reference {
-        painter.extend(egui::Shape::dashed_line(
-            &points_of(reference),
-            Stroke::new(1.4, theme::TEXT.gamma_multiply(0.6)),
-            4.0,
-            3.0,
-        ));
+    // With one profile the dash is ink-coloured; with one per ear each dash
+    // takes its ear's colour, faded, so the two "before" lines stay paired
+    // with their own "after" ones.
+    let single = traces.len() == 1;
+    for trace_of in traces {
+        if let Some(reference) = trace_of.reference {
+            let colour = if single {
+                theme::TEXT.gamma_multiply(0.6)
+            } else {
+                trace_of.colour.gamma_multiply(0.6)
+            };
+            painter.extend(egui::Shape::dashed_line(
+                &points_of(reference),
+                Stroke::new(1.4, colour),
+                4.0,
+                3.0,
+            ));
+        }
     }
-    if let Some(curve) = curve {
-        trace(curve, Stroke::new(1.5, theme::ACCENT));
-        // Only the drawn profile gets its peak marked: that dot is the number
-        // the renderer is asked to confirm, and the ghost is not running.
-        painter.circle_filled(
-            egui::pos2(x(f64::from(curve.peak_hz)), y(curve.max_response_db)),
-            2.5,
-            theme::ACCENT,
-        );
+    for trace_of in traces {
+        if let Some(curve) = &trace_of.curve {
+            trace(curve, Stroke::new(1.5, trace_of.colour));
+            // Only the drawn profiles get their peak marked: that dot is the
+            // number the renderer is asked to confirm, and the ghost is not
+            // running.
+            painter.circle_filled(
+                egui::pos2(x(f64::from(curve.peak_hz)), y(curve.max_response_db)),
+                2.5,
+                trace_of.colour,
+            );
+        }
     }
+}
+
+/// One ear's line on the response plot — or both ears', while they share a
+/// profile: what the output runs, and the file alone behind it once a knob
+/// has moved them apart.
+struct HptfTrace<'a> {
+    curve: Option<crate::hptf_profile::Curve>,
+    reference: Option<&'a crate::hptf_profile::Curve>,
+    colour: egui::Color32,
 }
 
 /// Where our reading of a profile and the renderer's disagree.
@@ -5354,6 +5657,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         let request = crate::backend::HptfRequest {
             settings: native::HptfSettings {
                 profile: profile.to_owned(),
+                right: None,
                 auto_trim: false,
             },
             adjustment,
@@ -5364,7 +5668,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert_eq!(status.applied_revision, 1);
         // One from the file, one shelf for the bass and three for the tilt.
         assert_eq!(
-            status.bands,
+            status.left.bands,
             1 + u32::try_from(adjustment.bands().len()).unwrap()
         );
 
@@ -5373,18 +5677,18 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
             .unwrap()
             .with(adjustment)
             .unwrap();
-        let drawn = crate::hptf_profile::Curve::of(&adjusted, status.rate);
+        let drawn = crate::hptf_profile::Curve::of(&adjusted, status.left.rate);
         assert!(
-            (drawn.preamp_db - status.preamp_db).abs() < 0.01,
+            (drawn.preamp_db - status.left.preamp_db).abs() < 0.01,
             "preamp drawn {:+.3} vs designed {:+.3}",
             drawn.preamp_db,
-            status.preamp_db
+            status.left.preamp_db
         );
         assert!(
-            (drawn.max_response_db - status.max_response_db).abs() < 0.1,
+            (drawn.max_response_db - status.left.max_response_db).abs() < 0.1,
             "peak drawn {:+.3} vs designed {:+.3}",
             drawn.max_response_db,
-            status.max_response_db
+            status.left.max_response_db
         );
 
         // Back to rest is back to the file's own cascade, through the file
@@ -5395,7 +5699,68 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         };
         assert_eq!(plain.apply(&control, 2), Ok(true));
         session.reset(2, 0).unwrap();
-        assert_eq!(control.hptf_status().unwrap().bands, 1);
+        assert_eq!(control.hptf_status().unwrap().left.bands, 1);
+    }
+
+    #[cfg(macinrender_output)]
+    #[test]
+    fn both_ears_take_the_knobs_an_ear_without_a_profile_included() {
+        use macindecode_macinrender as native;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("left.txt");
+        std::fs::write(
+            &path,
+            b"Preamp: -1 dB\nFilter 1: ON PK Fc 1000 Hz Gain -3 dB Q 1\n",
+        )
+        .unwrap();
+        let mut session = native::Session::new(&native::Config {
+            renderer: native::RendererSettings {
+                speaker_renderer: native::SpeakerRenderer::SafVbap,
+                binaural: true,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: true,
+                room: None,
+            },
+            output: native::OutputKind::Null,
+            device_id: String::new(),
+            input_rate: 48_000,
+        })
+        .unwrap();
+        let control = session.control();
+        let adjustment = crate::hptf_profile::Adjustment {
+            bass_db: 3.0,
+            tilt_db_per_octave: 0.0,
+        };
+        let added = u32::try_from(adjustment.bands().len()).unwrap();
+        let request = crate::backend::HptfRequest {
+            settings: native::HptfSettings {
+                profile: path.to_str().unwrap().to_owned(),
+                right: Some(String::new()),
+                auto_trim: false,
+            },
+            adjustment,
+        };
+        assert_eq!(request.apply(&control, 1), Ok(true));
+        session.reset(1, 0).unwrap();
+        let status = control.hptf_status().unwrap();
+        assert_eq!(status.applied_revision, 1);
+        assert_eq!((status.left.bands, status.right.bands), (1 + added, added));
+        // The knobs' own preamp, on each ear's.
+        let shift = adjustment.preamp_db();
+        assert!((f64::from(status.left.preamp_db) - (-1.0 + shift)).abs() < 1e-3);
+        assert!((f64::from(status.right.preamp_db) - shift).abs() < 1e-3);
+
+        // At rest the empty ear is passed through and the other runs its file.
+        let plain = crate::backend::HptfRequest {
+            adjustment: crate::hptf_profile::Adjustment::default(),
+            ..request
+        };
+        assert_eq!(plain.apply(&control, 2), Ok(true));
+        session.reset(2, 0).unwrap();
+        let status = control.hptf_status().unwrap();
+        assert_eq!((status.left.bands, status.right.bands), (1, 0));
+        assert!(!status.right.enabled);
     }
 
     #[cfg(macinrender_output)]
@@ -5431,6 +5796,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
                 control.set_hptf(
                     &native::HptfSettings {
                         profile: profile.to_owned(),
+                        right: None,
                         auto_trim,
                     },
                     revision
@@ -5441,21 +5807,21 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
             let status = control.hptf_status().unwrap();
             assert_eq!(status.applied_revision, revision);
             let readout = crate::backend::HptfReadout {
-                enabled: status.enabled,
-                bands: status.bands,
-                rate: status.rate,
-                preamp_db: status.preamp_db,
-                auto_trim_db: status.auto_trim_db,
-                max_response_db: status.max_response_db,
+                enabled: status.left.enabled,
+                bands: status.left.bands,
+                rate: status.left.rate,
+                preamp_db: status.left.preamp_db,
+                auto_trim_db: status.left.auto_trim_db,
+                max_response_db: status.left.max_response_db,
             };
-            let original = crate::hptf_profile::Curve::read(profile, status.rate).unwrap();
-            let mut drawn = original.with_output_trim(status.auto_trim_db);
+            let original = crate::hptf_profile::Curve::read(profile, status.left.rate).unwrap();
+            let mut drawn = original.with_output_trim(status.left.auto_trim_db);
             assert!(original.max_response_db > 5.9);
             if auto_trim {
                 assert!(drawn.max_response_db.abs() < 0.01);
             }
             for (before, after) in original.points.iter().zip(&drawn.points) {
-                assert!((after - before - status.auto_trim_db).abs() < 0.0001);
+                assert!((after - before - status.left.auto_trim_db).abs() < 0.0001);
             }
             assert_eq!(hptf_disagreement(&drawn, &readout), None);
             drawn.max_response_db += 1.0;
@@ -6190,12 +6556,12 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         // Inside the fixed frame nothing rescales, which is the whole point of
         // fixing it.
         let quiet = curve(1.5, -4.0);
-        assert!(axis(3.0, -12.0, hptf_axis([None, None, None])));
-        assert!(axis(3.0, -12.0, hptf_axis([None, None, Some(&quiet)])));
+        assert!(axis(3.0, -12.0, hptf_axis(&[None, None, None])));
+        assert!(axis(3.0, -12.0, hptf_axis(&[None, None, Some(&quiet)])));
         assert!(axis(
             3.0,
             -12.0,
-            hptf_axis([Some(&quiet), Some(&quiet), Some(&quiet)])
+            hptf_axis(&[Some(&quiet), Some(&quiet), Some(&quiet)])
         ));
 
         // Any of the three running past either end extends the frame, so
@@ -6205,17 +6571,17 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
         assert!(axis(
             8.0,
             -21.0,
-            hptf_axis([Some(&loud), None, Some(&quiet)])
+            hptf_axis(&[Some(&loud), None, Some(&quiet)])
         ));
         assert!(axis(
             8.0,
             -21.0,
-            hptf_axis([Some(&quiet), Some(&loud), None])
+            hptf_axis(&[Some(&quiet), Some(&loud), None])
         ));
         assert!(axis(
             8.0,
             -21.0,
-            hptf_axis([None, Some(&quiet), Some(&loud)])
+            hptf_axis(&[None, Some(&quiet), Some(&loud)])
         ));
     }
 
@@ -6234,8 +6600,9 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
                 .unwrap()
                 .with(adjustment)
                 .unwrap();
-        let (directory, file) =
-            stage_tuned_profile(&tuned, "/hptf/Sony_MDR-MV1.txt", adjustment).unwrap();
+        let (directory, files) =
+            stage_tuned_profiles(&[(&tuned, "/hptf/Sony_MDR-MV1.txt")], adjustment).unwrap();
+        let [file] = files.try_into().unwrap();
 
         assert_eq!(
             file.file_name().and_then(std::ffi::OsStr::to_str),
@@ -6323,7 +6690,7 @@ Filter 10: ON WAT Fc 500 Hz Gain 1 dB Q 1
                         spacing = ui.spacing().clone();
                         height = ui
                             .scope(|ui| {
-                                draw_catalog_files(ui, catalog, None, selected, &mut shown);
+                                draw_catalog_files(ui, catalog, &[], selected, &mut shown);
                             })
                             .response
                             .rect

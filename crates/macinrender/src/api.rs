@@ -31,9 +31,9 @@ macro_rules! api {
                 }
                 let api = Self { $($name,)* };
                 // SAFETY: validated version entrypoints take no pointers.
-                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 49 {
-                    // 1.48 fixes the room quality per session, 1.49 adds automatic room mapping.
-                    return Err("MacinRender C ABI v1.49 or later is required".into());
+                if unsafe { (api.adm_api_version_major)() } != 1 || unsafe { (api.adm_api_version_minor)() } < 50 {
+                    // 1.49 adds automatic room mapping, 1.50 headphone compensation per ear.
+                    return Err("MacinRender C ABI v1.50 or later is required".into());
                 }
                 let _ = CACHED.set(api.clone());
                 Ok(api)
@@ -68,8 +68,17 @@ api! {
     adm_scene_output_set_volume(*mut c_void, f32) -> i32;
     adm_scene_output_get_status(*mut c_void, *mut raw::OutputStatus) -> i32;
     adm_scene_output_set_hptf_ex(*const c_void, *const raw::HptfConfig, *mut *mut c_char) -> i32;
-    adm_scene_output_get_hptf_info(*mut c_void, *mut raw::HptfInfo) -> i32;
     adm_scene_output_set_hptf_parameters(*mut c_void, *const raw::HptfParameters) -> i32;
+    adm_scene_output_set_hptf_stereo_ex(
+        *const c_void,
+        *const raw::HptfStereoConfig,
+        *mut *mut c_char
+    ) -> i32;
+    adm_scene_output_set_hptf_stereo_parameters(
+        *mut c_void,
+        *const raw::HptfStereoParameters
+    ) -> i32;
+    adm_scene_output_get_hptf_stereo_info(*mut c_void, *mut raw::HptfStereoInfo) -> i32;
     adm_hptf_parse_parametric_eq(
         *mut c_void,
         *const c_char,

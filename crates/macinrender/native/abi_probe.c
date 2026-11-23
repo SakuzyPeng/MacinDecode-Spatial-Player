@@ -3,8 +3,8 @@
 #include "adm/c_api.h"
 #include "mr_headmotion.h"
 
-#if ADM_API_VERSION < 14400
-#error MacinDecode requires MacinRender C ABI v1.44 or later
+#if ADM_API_VERSION < 15000
+#error MacinDecode requires MacinRender C ABI v1.50 or later
 #endif
 
 _Static_assert(ADM_RENDERER_TRIPLE_BALANCE == 7, "Triple Balance renderer value changed");
@@ -27,6 +27,9 @@ size_t macinrender_abi_size(uint32_t type) {
     case 13: return sizeof(adm_hptf_band_t);
     case 14: return sizeof(adm_hptf_parameters_t);
     case 15: return sizeof(adm_scene_diagnostic_t);
+    case 16: return sizeof(adm_hptf_stereo_config_t);
+    case 17: return sizeof(adm_hptf_stereo_parameters_t);
+    case 18: return sizeof(adm_hptf_stereo_info_t);
     default: return 0;
     }
 }
@@ -61,6 +64,13 @@ size_t macinrender_abi_offset(uint32_t field) {
     case 25: return offsetof(adm_hptf_parameters_t, revision);
     case 26: return offsetof(adm_scene_diagnostic_t, message);
     case 27: return offsetof(adm_scene_diagnostic_t, code);
+    case 28: return offsetof(adm_hptf_stereo_config_t, right_profile_path);
+    case 29: return offsetof(adm_hptf_stereo_config_t, revision);
+    case 30: return offsetof(adm_hptf_stereo_parameters_t, right_bands);
+    case 31: return offsetof(adm_hptf_stereo_parameters_t, right_preamp_db);
+    case 32: return offsetof(adm_hptf_stereo_parameters_t, revision);
+    case 33: return offsetof(adm_hptf_stereo_info_t, left);
+    case 34: return offsetof(adm_hptf_stereo_info_t, right);
     default: return (size_t)-1;
     }
 }

@@ -213,6 +213,39 @@ pub struct HptfParameters {
     pub reserved: u32,
     pub revision: u64,
 }
+/// v1.50: a profile file for each ear, applied as one revision.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HptfStereoConfig {
+    pub size: u32,
+    pub preamp_mode: i32,
+    pub left: *const c_char,
+    pub right: *const c_char,
+    pub revision: u64,
+}
+/// v1.50: a cascade for each ear, applied as one revision.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HptfStereoParameters {
+    pub size: u32,
+    pub preamp_mode: i32,
+    pub left_count: u32,
+    pub right_count: u32,
+    pub left_bands: *const HptfBand,
+    pub right_bands: *const HptfBand,
+    pub left_preamp_db: f64,
+    pub right_preamp_db: f64,
+    pub revision: u64,
+}
+/// v1.50: both ears of one applied revision. Only the outer `size` is set.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct HptfStereoInfo {
+    pub size: u32,
+    pub reserved: u32,
+    pub left: HptfInfo,
+    pub right: HptfInfo,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct HptfInfo {

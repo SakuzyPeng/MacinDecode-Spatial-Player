@@ -143,8 +143,17 @@ pub struct OutputSettings {
     pub room_metres_per_unit: f64,
     /// Screen mapping for screen-referenced objects; room renderer only.
     pub room_screen: ScreenSettings,
-    /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off.
+    /// `AutoEq` `ParametricEQ.txt` headphone compensation; empty is off. While
+    /// the ears are separate, the left ear's.
     pub hptf: String,
+    /// Each ear its own profile: `hptf` the left one, `hptf_right` the right.
+    pub hptf_separate_ears: bool,
+    /// The right ear's profile while the ears are separate, kept while they
+    /// are not so that separating them again returns to it. Empty leaves that
+    /// ear without a cascade of its own.
+    pub hptf_right: String,
+    /// The renderer trims both ears by the same amount, so this stays one
+    /// switch however many profiles there are.
     pub hptf_auto_trim: bool,
     /// The listener's own two knobs on top of that profile, in decibels and in
     /// decibels per octave. Both at rest means the profile reaches the renderer
@@ -174,6 +183,8 @@ impl Default for OutputSettings {
             room_metres_per_unit: ROOM_METRES_PER_UNIT_DEFAULT,
             room_screen: ScreenSettings::default(),
             hptf: String::new(),
+            hptf_separate_ears: false,
+            hptf_right: String::new(),
             hptf_auto_trim: false,
             hptf_bass_db: 0.0,
             hptf_tilt_db: 0.0,
@@ -210,14 +221,30 @@ impl OutputSettings {
     }
     #[cfg(macinrender_output)]
     pub fn hptf(&self) -> macindecode_macinrender::HptfSettings {
+        let applicable = self.hptf_applicable();
         macindecode_macinrender::HptfSettings {
-            profile: if self.hptf_applicable() {
+            profile: if applicable {
                 self.hptf.clone()
             } else {
                 String::new()
             },
+            right: (applicable && self.hptf_separate_ears).then(|| self.hptf_right.clone()),
             auto_trim: self.hptf_auto_trim,
         }
+    }
+    /// The profiles the ears take, left then right: the same one twice unless
+    /// the ears are separate. Empty is no profile for that ear.
+    pub fn hptf_ears(&self) -> [&str; 2] {
+        if self.hptf_separate_ears {
+            [&self.hptf, &self.hptf_right]
+        } else {
+            [&self.hptf; 2]
+        }
+    }
+    /// Whether either ear has a profile chosen, which is what the knobs need
+    /// something to sit on.
+    pub fn hptf_chosen(&self) -> bool {
+        self.hptf_ears().iter().any(|path| !path.is_empty())
     }
     /// The adjustment as the profile code understands it, already clamped and
     /// already silent on an output with no headphone feed to adjust.
@@ -229,7 +256,7 @@ impl OutputSettings {
         )
     )]
     pub fn hptf_adjustment(&self) -> crate::hptf_profile::Adjustment {
-        if !self.hptf_applicable() || self.hptf.is_empty() {
+        if !self.hptf_applicable() || !self.hptf_chosen() {
             return crate::hptf_profile::Adjustment::default();
         }
         crate::hptf_profile::Adjustment {
@@ -268,7 +295,12 @@ impl OutputSettings {
         if self.sofa.contains('\0') {
             self.sofa.clear();
         }
-        for path in [&mut self.hptf, &mut self.room, &mut self.room_hrir] {
+        for path in [
+            &mut self.hptf,
+            &mut self.hptf_right,
+            &mut self.room,
+            &mut self.room_hrir,
+        ] {
             if path.contains('\0') {
                 path.clear();
             }
@@ -543,6 +575,41 @@ mod tests {
         let mut broken = after.clone();
         broken.hptf.push('\0');
         assert!(broken.validated().hptf.is_empty());
+    }
+
+    #[test]
+    fn separate_ears_are_off_by_default_and_keep_the_right_profile_while_off() {
+        let before: OutputSettings = serde_json::from_str(r#"{"hptf":"both.txt"}"#).unwrap();
+        assert!(!before.hptf_separate_ears);
+        assert_eq!(before.hptf_ears(), ["both.txt"; 2]);
+
+        let mut separate = before.clone();
+        separate.hptf_separate_ears = true;
+        separate.hptf_right = "right.txt".into();
+        assert_eq!(separate.hptf_ears(), ["both.txt", "right.txt"]);
+        // Choosing a profile per ear blends into the running feed like any
+        // other profile change.
+        assert!(!before.needs_rebuild(&separate));
+        // Turning separation off keeps the right ear's choice for next time,
+        // without it reaching either ear meanwhile.
+        let mut joined = separate.clone();
+        joined.hptf_separate_ears = false;
+        assert_eq!(joined.hptf_right, "right.txt");
+        assert_eq!(joined.hptf_ears(), ["both.txt"; 2]);
+
+        // An ear may go without a profile; the knobs still have one to sit on.
+        let mut one_ear = separate.clone();
+        one_ear.hptf.clear();
+        assert!(one_ear.hptf_chosen());
+        one_ear.hptf_right.clear();
+        assert!(!one_ear.hptf_chosen());
+
+        let saved = serde_json::to_string(&separate).unwrap();
+        let reloaded: OutputSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.hptf_ears(), separate.hptf_ears());
+        let mut broken = separate;
+        broken.hptf_right.push('\0');
+        assert!(broken.validated().hptf_right.is_empty());
     }
 
     #[test]

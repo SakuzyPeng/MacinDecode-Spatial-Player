@@ -288,6 +288,53 @@ fn posebridge_device_window_requires_the_selected_head_source() {
 
 #[test]
 #[cfg(macinrender_output)]
+fn separating_the_ears_starts_from_the_shared_profile_and_edits_one_ear() {
+    use crate::app::{Ear, OutputPage};
+    use crate::backend::{OutputSettings, SpatialBackendKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    crate::theme::install(&context);
+    app.output_settings_open = true;
+    app.output_page = OutputPage::Headphones;
+    let profile = dir.path().join("both.txt");
+    std::fs::write(&profile, "Preamp: -2 dB\n").unwrap();
+    let profile = profile.to_str().unwrap().to_owned();
+    app.output.install_settings(OutputSettings {
+        null_output: true,
+        mode: SpatialBackendKind::SafBinaural,
+        head_source: crate::head_tracking::HeadSource::Manual,
+        hptf: profile.clone(),
+        ..Default::default()
+    });
+    let _ = ui_frame(&mut app, &context, 0.0, vec![]);
+    let output = ui_frame(&mut app, &context, 0.1, vec![]);
+    let widget = |output: &egui::FullOutput, label: &str| {
+        painted_text(output)
+            .into_iter()
+            .find(|(text, _, _)| text == label)
+            .unwrap_or_else(|| panic!("missing widget {label}"))
+            .1
+            .center()
+    };
+    let _ = click_widget(&mut app, &context, widget(&output, "Separate ears"), 1.0);
+    let settings = app.output.settings();
+    assert!(settings.hptf_separate_ears);
+    // Separating changes nothing that can be heard: both ears keep the file.
+    assert_eq!(settings.hptf_ears(), [profile.as_str(); 2]);
+
+    let output = ui_frame(&mut app, &context, 2.0, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Right: both.txt"), 3.0);
+    assert_eq!(app.hptf_ear, Ear::Right);
+    let output = ui_frame(&mut app, &context, 4.0, vec![]);
+    let _ = click_widget(&mut app, &context, widget(&output, "Turn off"), 5.0);
+    assert_eq!(app.output.settings().hptf_ears(), [profile.as_str(), ""]);
+    let output = ui_frame(&mut app, &context, 6.0, vec![]);
+    let _ = widget(&output, "Right: none");
+}
+
+#[test]
+#[cfg(macinrender_output)]
 fn audio_page_round_trips_preserve_choices_until_a_tab_is_clicked() {
     use crate::app::OutputPage;
     use crate::backend::{OutputSettings, SpatialBackendKind};
@@ -1803,7 +1850,7 @@ fn saving_a_tuned_profile_selects_it_and_puts_the_knobs_back() {
     let file = staging.path().join(name);
     std::fs::write(&file, tuned.to_parametric_eq()).unwrap();
     app.hptf_saving = Some(staging);
-    app.hptf.refresh(Some(file), &context);
+    app.hptf.refresh(vec![file], &context);
     settle_hptf_catalog(&mut app, &context);
 
     let settings = app.output.settings().clone();
@@ -1822,6 +1869,94 @@ fn saving_a_tuned_profile_selects_it_and_puts_the_knobs_back() {
         landed.bands(),
         1 + u32::try_from(adjustment.bands().len()).unwrap()
     );
+
+    app.flush_persistence();
+    app.library.shutdown();
+}
+
+/// With separate ears a save writes the profile each ear is running, and each
+/// lands on its own ear in the same settings change that puts the knobs back.
+#[test]
+fn saving_with_separate_ears_writes_one_profile_per_ear() {
+    use crate::hptf_profile::{Adjustment, Profile};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, context) = open(dir.path());
+    settle(&mut app, &context);
+    settle_hptf_catalog(&mut app, &context);
+
+    let write = |name: &str, text: &str| {
+        let path = app.hptf.root.join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    let left_text = "Preamp: -1 dB\nFilter 1: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
+    let right_text = "Preamp: -2 dB\n";
+    let left = write("left.txt", left_text);
+    let right = write("right.txt", right_text);
+    let adjustment = Adjustment {
+        bass_db: 2.5,
+        tilt_db_per_octave: 0.0,
+    };
+    let mut settings = app.output.settings().clone();
+    settings.hptf.clone_from(&left);
+    settings.hptf_separate_ears = true;
+    settings.hptf_right.clone_from(&right);
+    settings.hptf_bass_db = 2.5;
+    app.change_output_settings(settings.clone(), &context);
+    crate::app::hptf_curve(&mut app.hptf_drawing, &left, 48_000, adjustment);
+    crate::app::hptf_curve(&mut app.hptf_drawing_right, &right, 48_000, adjustment);
+
+    let staged = app.stage_tuned_hptf(&settings, adjustment).unwrap();
+    assert_eq!(staged.files.len(), 2);
+    app.hptf_saving = Some(staged.directory);
+    app.hptf_targets = staged.targets;
+    app.hptf.refresh(staged.files, &context);
+    settle_hptf_catalog(&mut app, &context);
+
+    let saved = app.output.settings().clone();
+    assert!(saved.hptf_separate_ears);
+    assert!(
+        saved.hptf.ends_with("left (bass +2.5 dB).txt"),
+        "{}",
+        saved.hptf
+    );
+    assert!(
+        saved.hptf_right.ends_with("right (bass +2.5 dB).txt"),
+        "{}",
+        saved.hptf_right
+    );
+    assert!(saved.hptf_bass_db == 0.0 && saved.hptf_tilt_db == 0.0);
+    assert!(app.hptf_targets.is_empty() && app.hptf_saving.is_none());
+    for (landed, text) in [(&saved.hptf, left_text), (&saved.hptf_right, right_text)] {
+        let expected = Profile::parse(text).unwrap().with(adjustment).unwrap();
+        let landed = Profile::parse(&std::fs::read_to_string(landed).unwrap()).unwrap();
+        assert_eq!(expected.disagreement(&landed), None);
+    }
+
+    // One file on both ears is saved once, for both.
+    let mut settings = saved;
+    settings.hptf.clone_from(&left);
+    settings.hptf_right.clone_from(&left);
+    settings.hptf_bass_db = 1.0;
+    app.change_output_settings(settings.clone(), &context);
+    let adjustment = Adjustment {
+        bass_db: 1.0,
+        tilt_db_per_octave: 0.0,
+    };
+    crate::app::hptf_curve(&mut app.hptf_drawing, &left, 48_000, adjustment);
+    let staged = app.stage_tuned_hptf(&settings, adjustment).unwrap();
+    assert_eq!(staged.files.len(), 1);
+    app.hptf_saving = Some(staged.directory);
+    app.hptf_targets = staged.targets;
+    app.hptf.refresh(staged.files, &context);
+    settle_hptf_catalog(&mut app, &context);
+    let saved = app.output.settings();
+    assert!(
+        saved.hptf.ends_with("left (bass +1.0 dB).txt"),
+        "{}",
+        saved.hptf
+    );
+    assert_eq!(saved.hptf, saved.hptf_right);
 
     app.flush_persistence();
     app.library.shutdown();
@@ -1852,7 +1987,7 @@ fn failed_profile_save_releases_staging_and_preserves_later_import_adjustments()
     let saved = staged_path.join("saved.txt");
     std::fs::write(&saved, "Preamp: -3 dB\n").unwrap();
     app.hptf_saving = Some(staging);
-    app.hptf.refresh(Some(saved), &context);
+    app.hptf.refresh(vec![saved], &context);
     settle_hptf_catalog(&mut app, &context);
 
     assert!(app.hptf.message.contains("regular"), "{}", app.hptf.message);
@@ -1869,7 +2004,7 @@ fn failed_profile_save_releases_staging_and_preserves_later_import_adjustments()
     std::fs::create_dir(&app.hptf.root).unwrap();
     let plain = dir.path().join("ordinary-import.txt");
     std::fs::write(&plain, "Preamp: -1 dB\n").unwrap();
-    app.hptf.refresh(Some(plain), &context);
+    app.hptf.refresh(vec![plain], &context);
     settle_hptf_catalog(&mut app, &context);
 
     let imported = app.hptf.root.join("ordinary-import.txt");

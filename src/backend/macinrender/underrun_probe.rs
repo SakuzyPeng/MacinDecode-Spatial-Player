@@ -97,11 +97,11 @@ fn current_player_saf_pose_underrun_probe() {
         let applied = runtime.hptf_status();
         if applied.applied_revision == 1 && output.playhead_frames > 0 {
             initial_underruns = output.underruns;
-            assert_eq!(applied.enabled, !hptf.settings.profile.is_empty());
+            assert_eq!(applied.enabled(), !hptf.settings.is_off());
             println!(
                 "{}",
-                json!({"event":"ready","hptf_enabled":applied.enabled,
-                "hptf_bands":applied.bands,"hptf_revision":applied.applied_revision,
+                json!({"event":"ready","hptf_enabled":applied.enabled(),
+                "hptf_bands":[applied.left.bands, applied.right.bands],"hptf_revision":applied.applied_revision,
                 "playhead":output.playhead_frames,"underruns":output.underruns})
             );
             break;

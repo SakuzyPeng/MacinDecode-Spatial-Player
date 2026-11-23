@@ -187,7 +187,7 @@ impl SpatialOutputController {
                 .hptf_accepted
                 .as_ref()
                 .is_some_and(|(accepted, _)| accepted == &wanted)
-            || (self.hptf_accepted.is_none() && wanted.settings.profile.is_empty())
+            || (self.hptf_accepted.is_none() && wanted.settings.is_off())
         {
             return;
         }
@@ -195,9 +195,10 @@ impl SpatialOutputController {
         runtime.set_hptf(wanted.clone(), self.hptf_revision);
         self.hptf_pending = Some((wanted, self.hptf_revision));
     }
-    /// The profile the current output is actually running, on the same terms as
-    /// [`Self::active_sofa`]: selected is not applied, and a swap only counts
-    /// once the audio callback has taken up that revision.
+    /// The profiles the current output is actually running, left ear then
+    /// right — the same one twice while the ears share it — on the same terms
+    /// as [`Self::active_sofa`]: selected is not applied, and a swap only
+    /// counts once the audio callback has taken up that revision.
     #[cfg_attr(
         not(macinrender_output),
         allow(
@@ -205,15 +206,16 @@ impl SpatialOutputController {
             reason = "no native headphone feed exists in inspection builds"
         )
     )]
-    pub fn active_hptf(&self) -> Option<&str> {
+    pub fn active_hptf(&self) -> Option<[&str; 2]> {
         #[cfg(macinrender_output)]
         if let Some(runtime) = &self.runtime
             && self.settings.hptf_applicable()
             && let Some((accepted, revision)) = &self.hptf_accepted
         {
             let status = runtime.hptf_status();
-            if status.enabled && status.applied_revision == *revision {
-                return Some(&accepted.settings.profile);
+            if status.enabled() && status.applied_revision == *revision {
+                let left = accepted.settings.profile.as_str();
+                return Some([left, accepted.settings.right.as_deref().unwrap_or(left)]);
             }
         }
         None
@@ -238,7 +240,7 @@ impl SpatialOutputController {
             && let Some((accepted, revision)) = &self.hptf_accepted
         {
             let status = runtime.hptf_status();
-            if status.enabled && status.applied_revision == *revision {
+            if status.enabled() && status.applied_revision == *revision {
                 return accepted.adjustment;
             }
         }
@@ -251,20 +253,21 @@ impl SpatialOutputController {
             reason = "no native headphone feed exists in inspection builds"
         )
     )]
-    pub fn hptf_readout(&self) -> HptfReadout {
+    /// What the renderer reports for each ear, left then right.
+    pub fn hptf_readout(&self) -> [HptfReadout; 2] {
         #[cfg(macinrender_output)]
         if let Some(runtime) = &self.runtime {
             let status = runtime.hptf_status();
-            return HptfReadout {
-                enabled: status.enabled,
-                bands: status.bands,
-                rate: status.rate,
-                preamp_db: status.preamp_db,
-                auto_trim_db: status.auto_trim_db,
-                max_response_db: status.max_response_db,
-            };
+            return [status.left, status.right].map(|ear| HptfReadout {
+                enabled: ear.enabled,
+                bands: ear.bands,
+                rate: ear.rate,
+                preamp_db: ear.preamp_db,
+                auto_trim_db: ear.auto_trim_db,
+                max_response_db: ear.max_response_db,
+            });
         }
-        HptfReadout::default()
+        [HptfReadout::default(); 2]
     }
     pub fn take_hptf_error(&mut self) -> Option<String> {
         self.hptf_error.take()
@@ -576,6 +579,38 @@ impl SpatialOutputController {
         }
     }
 
+    /// Put the settings back to the compensation the output last accepted.
+    #[cfg(macinrender_output)]
+    fn restore_accepted_hptf(&mut self) {
+        // Put the knobs back with the profile: a rejected cascade is
+        // rejected as a whole, and leaving a knob where it caused the
+        // refusal would make the next sync try the same thing again.
+        let previous = self.hptf_accepted.as_ref().map(|(request, _)| request);
+        self.settings.hptf =
+            previous.map_or_else(String::new, |request| request.settings.profile.clone());
+        // Ears and all: a pair is refused as a pair.
+        match previous {
+            Some(request) => {
+                self.settings.hptf_separate_ears = request.settings.right.is_some();
+                if let Some(right) = &request.settings.right {
+                    self.settings.hptf_right.clone_from(right);
+                }
+            }
+            None => self.settings.hptf_right.clear(),
+        }
+        self.settings.hptf_auto_trim = previous.is_some_and(|request| request.settings.auto_trim);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the knobs are stored as the widget's f32 and \
+                      only widened to design the bands"
+        )]
+        {
+            self.settings.hptf_bass_db =
+                previous.map_or(0.0, |request| request.adjustment.bass_db as f32);
+            self.settings.hptf_tilt_db =
+                previous.map_or(0.0, |request| request.adjustment.tilt_db_per_octave as f32);
+        }
+    }
     pub fn poll(&mut self) {
         self.legacy.poll();
         #[cfg(macinrender_output)]
@@ -627,25 +662,7 @@ impl SpatialOutputController {
                     && self.settings.hptf() == wanted.settings
                     && self.settings.hptf_adjustment() == wanted.adjustment
                 {
-                    // Put the knobs back with the profile: a rejected cascade is
-                    // rejected as a whole, and leaving a knob where it caused the
-                    // refusal would make the next sync try the same thing again.
-                    let previous = self.hptf_accepted.as_ref().map(|(request, _)| request);
-                    self.settings.hptf = previous
-                        .map_or_else(String::new, |request| request.settings.profile.clone());
-                    self.settings.hptf_auto_trim =
-                        previous.is_some_and(|request| request.settings.auto_trim);
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        reason = "the knobs are stored as the widget's f32 and \
-                                  only widened to design the bands"
-                    )]
-                    {
-                        self.settings.hptf_bass_db =
-                            previous.map_or(0.0, |request| request.adjustment.bass_db as f32);
-                        self.settings.hptf_tilt_db = previous
-                            .map_or(0.0, |request| request.adjustment.tilt_db_per_octave as f32);
-                    }
+                    self.restore_accepted_hptf();
                 }
                 // A newer desired setting may have arrived while this request ran.
                 self.sync_hptf();
@@ -872,7 +889,8 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(output.active_hptf(), good.to_str());
+        let good_path = good.to_str().unwrap();
+        assert_eq!(output.active_hptf(), Some([good_path; 2]));
         settings.hptf = bad.to_str().unwrap().to_owned();
         output.hot_settings(settings);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -885,12 +903,12 @@ mod tests {
             assert!(Instant::now() < deadline, "bad profile did not fail");
             thread::sleep(Duration::from_millis(5));
         }
-        let readout = output.hptf_readout();
+        let [readout, _] = output.hptf_readout();
         assert!(readout.enabled);
         assert!((readout.preamp_db + 3.0).abs() < f32::EPSILON);
         assert_eq!(
             output.active_hptf(),
-            good.to_str(),
+            Some([good_path; 2]),
             "old EQ is still audible but has lost its active identity"
         );
         assert_eq!(output.settings().hptf, good.to_str().unwrap());
@@ -902,7 +920,8 @@ mod tests {
         settings.hptf = bad.to_str().unwrap().to_owned();
         output.hot_settings(settings);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while output.active_hptf() != bad.to_str() {
+        let bad_path = bad.to_str().unwrap();
+        while output.active_hptf() != Some([bad_path; 2]) {
             output.poll();
             assert!(
                 Instant::now() < deadline,
@@ -910,7 +929,81 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        assert!((output.hptf_readout().preamp_db + 6.0).abs() < f32::EPSILON);
+        assert!((output.hptf_readout()[0].preamp_db + 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn separate_ears_run_as_a_pair_and_a_refused_pair_restores_the_shared_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let shared = directory.path().join("shared.txt");
+        let right = directory.path().join("right.txt");
+        let broken = directory.path().join("broken.txt");
+        std::fs::write(&shared, b"Preamp: -3 dB\n").unwrap();
+        std::fs::write(
+            &right,
+            b"Preamp: -5 dB\nFilter 1: ON PK Fc 1000 Hz Gain -2 dB Q 1\n",
+        )
+        .unwrap();
+        std::fs::write(&broken, b"not a profile\n").unwrap();
+        let key = PlaybackKey::new(42, 1);
+        let (queue, reader) = scene_queue_pair(key);
+        let signature = SceneSignature::from_block(&tone(0));
+        for i in 0..90 {
+            queue.try_push(key, tone(i * 1024)).unwrap();
+        }
+        queue.mark_end_of_stream(key);
+        let mut output = SpatialOutputController::new();
+        output.install_settings(OutputSettings {
+            null_output: true,
+            mode: SpatialBackendKind::SafBinaural,
+            ..Default::default()
+        });
+        output.playing = true;
+        output.ensure_configured(&output_config(signature), reader);
+        let wait_for = |output: &mut SpatialOutputController, ears: [&str; 2]| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while output.active_hptf() != Some(ears) {
+                output.poll();
+                assert!(
+                    Instant::now() < deadline,
+                    "{ears:?} did not activate: {:?}",
+                    output.take_hptf_error()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let (shared, right, broken) = (
+            shared.to_str().unwrap(),
+            right.to_str().unwrap(),
+            broken.to_str().unwrap(),
+        );
+        let mut settings = output.settings().clone();
+        settings.hptf = shared.to_owned();
+        output.hot_settings(settings.clone());
+        wait_for(&mut output, [shared; 2]);
+
+        // A broken right ear is refused with its pair, and the settings go
+        // back to the shared profile that is still running.
+        settings.hptf_separate_ears = true;
+        settings.hptf_right = broken.to_owned();
+        output.hot_settings(settings.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while output.take_hptf_error().is_none() {
+            output.poll();
+            assert!(Instant::now() < deadline, "the broken pair did not fail");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!output.settings().hptf_separate_ears);
+        assert_eq!(output.settings().hptf, shared);
+        assert_eq!(output.active_hptf(), Some([shared; 2]));
+
+        settings.hptf_right = right.to_owned();
+        output.hot_settings(settings);
+        wait_for(&mut output, [shared, right]);
+        let [left_ear, right_ear] = output.hptf_readout();
+        assert_eq!((left_ear.bands, right_ear.bands), (0, 1));
+        assert!((left_ear.preamp_db + 3.0).abs() < 1e-4);
+        assert!((right_ear.preamp_db + 5.0).abs() < 1e-4);
     }
 
     #[cfg(target_os = "macos")]

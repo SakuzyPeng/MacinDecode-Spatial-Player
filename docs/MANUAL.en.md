@@ -519,6 +519,23 @@ Point at another row in the list and **that profile is drawn faintly behind the 
 own file reads. Drawn only, never sent — so comparing two profiles cannot interrupt the one you are
 listening to.
 
+#### One profile per ear
+
+Tick **Separate ears** to give each ear its own profile — for example one measured on each side of
+your head. It starts with the profile both ears already had, so ticking it changes nothing you can
+hear. Two buttons then name the left and right ear's profile; pick one and the list below chooses for
+that ear, and **Turn off** leaves just that ear without a profile of its own.
+
+Both curves are drawn, the left ear in orange and the right in green, and each ear is checked and read
+back on its own. Three things stay common to both ears: **Bass**, **Tilt** and the automatic trim.
+The knobs are your preference rather than a difference between the two sides of the headphones, so
+an ear without a profile still takes them; and the renderer trims both ears by the same amount, so
+one boosted ear never makes the two sides differ in level.
+
+The two profiles are applied together: if one of them cannot be read, neither changes, and the panel
+goes back to the pair that is still playing. Unticking the box returns both ears to the left ear's
+profile and keeps the right one's choice for next time.
+
 #### Checked band for band
 
 The moment a file is read, the player checks it against the renderer's own reading of the same text —
@@ -541,7 +558,8 @@ the file exactly as written.
 
 **Save as profile…** writes the two together into `hptf/` as an ordinary profile, selects it and
 returns the knobs to rest. A setting worth keeping becomes a file you can copy and share rather than
-two numbers in the settings.
+two numbers in the settings. With separate ears it writes one profile per ear and selects each on its
+own ear (one file for both if both ears use the same profile).
 
 #### Pairing it with your SOFA
 

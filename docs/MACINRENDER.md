@@ -8,7 +8,7 @@ Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-nativ
 `Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
 VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
 
-当前固定 Core `c87e18b` / C ABI 1.50（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+当前固定 Core `c87e18b` / C ABI 1.50（`abi_probe.c` 与运行时版本检查都要求不低于 1.50）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
 
 Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
 
@@ -150,7 +150,7 @@ AC-4 Scene 的 `screen_factor` 按 Core 的 ADM 导出规则转换成 `screenRef
 `native::RoomSettings`（清单、HRIR、`metres_per_unit`（自动为 `None`）、屏幕 JSON（`maps()` 为假时为
 `None`））。crate 据此选渲染器 8（`ADM_RENDERER_ROOM_BINAURAL`），`sofa` 留空，HRIR 经
 `adm_room_config_t.hrir_manifest` 传入；会话经 `adm_create_scene_stream_with_room_quality` 创建，房间包用
-`adm_room_load` 载入、调用返回即释放（上游的流与切换请求各自持有所需的包）。C ABI 下限为 1.49。
+`adm_room_load` 载入、调用返回即释放（上游的流与切换请求各自持有所需的包）。C ABI 下限为 1.50（左右独立 HpTF）。
 
 - **档位固定为 realtime**（`room-realtime-v2`，ADR 0020）：原生 SIMD FFT 与错开的反射网格，上游的设备长测
   就在这一档。exact 档留给需要跨平台逐位一致的离线渲染；档位随会话固定，播放器不提供选择。
@@ -268,6 +268,29 @@ profile 的段数加派生段超过 32 时**拒绝**而不是丢弃尾巴，理�
 
 面板上派生段单独计数（`10 bands + 4 adjustment`），旋钮不在零点时用虚线另画一条"profile 本身"。文件
 要的和使用者要的，任何时候都分得开——这正是这块面板拿掉"compensation"一词的那条道理。
+
+### 左右耳分开
+
+C ABI 1.50 的 `adm_scene_output_set_hptf_stereo_ex`（左右各一个文件）、
+`adm_scene_output_set_hptf_stereo_parameters`（左右各一组内存级联）和
+`adm_scene_output_get_hptf_stereo_info` 已绑定，三个新 POD 的 size 与关键 offset 进了 `abi_probe.c` 的对拍。
+上游约定：左右作为**同一个 revision** 发布，失败时整对保留原配置；空路径或零段加 0 dB preamp 表示该耳没有 PEQ，
+但仍承受**两耳共同**的 `AUTO_TRIM` 衰减；两耳配置不同时旧的单耳 `get_hptf_info` 返回 UNSUPPORTED。
+所以播放器读状态**一律**走双耳查询，`HptfStatus` 按耳给出 `left` / `right`，`applied_revision` 只有一个。
+
+设置里 `hptf` 是共用或左耳的 profile，`hptf_separate_ears` 打开时 `hptf_right` 是右耳的（可以为空）；
+关闭时 `hptf_right` 保留，不送给任何一只耳朵。旧设置没有这两个字段，读回来就是共用，不需要迁移。
+`HptfSettings::right` 为 `None` 时走原来的单耳入口，所以不分耳的路径与改动前完全相同。
+
+Bass 与 Tilt 两耳共用：它们是听者的偏好，不是耳机左右的差异。旋钮离开零点时两耳各自"文件 + 派生段"，
+没有文件的一耳只有派生段（`Profile::of_bands(0, [])` 再附加），一起经 stereo parameters 下发。
+
+失败恢复按整对进行：`restore_accepted_hptf` 把左右路径、是否分耳、auto trim 和旋钮一起退回最后一次被接受的请求。
+`active_hptf` 返回 `[左, 右]`（共用时同一路径两次），目录列表里两份都标 **in use**；面板按耳画两条曲线
+（左用强调色、右用 `SUCCESS` 绿），解析对账、运行对账与读数都逐耳进行。
+
+「Save as profile…」在分耳时每耳各写一份（来源相同则只写一份、两耳共用），文件导入改为
+`Catalog::refresh(Vec<PathBuf>)` 按序导入多份，`hptf_targets` 记下每份对应哪只耳朵；选中与旋钮归零仍是同一次 settings 变更。
 
 ### 存成 profile
 

@@ -326,7 +326,11 @@ impl RendererSettings {
 /// unit-gain multiply.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HptfSettings {
+    /// The profile for both ears, or for the left ear once `right` is set.
     pub profile: String,
+    /// The right ear's own profile. `None` gives both ears `profile`; an empty
+    /// one leaves that ear without a cascade of its own.
+    pub right: Option<String>,
     /// Attenuate further when the designed cascade still peaks above 0 dB across
     /// 20 Hz-20 kHz. Off means the file's own `Preamp:` line is used verbatim.
     pub auto_trim: bool,
@@ -393,11 +397,38 @@ pub struct HptfProfile {
     pub bands: Vec<HptfBand>,
 }
 
-/// What the headphone feed is actually running. `applied_revision` echoes the
-/// revision handed to [`Control::set_hptf`] once the audio callback has taken
-/// it up, so a caller can tell a selected profile from a live one.
+impl HptfSettings {
+    /// No cascade on either ear.
+    #[must_use]
+    pub fn is_off(&self) -> bool {
+        self.profile.is_empty() && self.right.as_deref().is_none_or(str::is_empty)
+    }
+}
+
+/// What the headphone feed is actually running, ear by ear. `applied_revision`
+/// echoes the revision handed to [`Control::set_hptf`] once the audio callback
+/// has taken it up, so a caller can tell a selected profile from a live one.
+/// Both ears always describe the same revision.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct HptfStatus {
+    pub left: HptfEar,
+    pub right: HptfEar,
+    pub applied_revision: u64,
+}
+
+impl HptfStatus {
+    /// Whether either ear is filtered at all, the common trim included.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.left.enabled || self.right.enabled
+    }
+}
+
+/// One ear's compensation.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HptfEar {
+    /// Whether this ear's gain is anything but unity, which a common trim can
+    /// make true of an ear with no cascade of its own.
     pub enabled: bool,
     pub bands: u32,
     /// The rate the sections were designed at. A biquad's response depends
@@ -408,7 +439,41 @@ pub struct HptfStatus {
     /// Peak of the designed response over 20 Hz-20 kHz, preamp included. Above
     /// zero the compensation can clip before the output's own ceiling catches it.
     pub max_response_db: f32,
-    pub applied_revision: u64,
+}
+
+impl HptfEar {
+    fn of(info: &raw::HptfInfo) -> Self {
+        Self {
+            enabled: info.enabled != 0,
+            bands: info.band_count,
+            rate: info.sample_rate,
+            preamp_db: info.preamp_db,
+            auto_trim_db: info.auto_trim_db,
+            max_response_db: info.max_response_db,
+        }
+    }
+}
+
+/// A cascade in the renderer's array form. Every element carries the stride,
+/// because the renderer walks an array it did not allocate and a newer caller
+/// may append fields.
+fn raw_bands(profile: &HptfProfile) -> Result<(Vec<raw::HptfBand>, u32), String> {
+    let bands: Vec<raw::HptfBand> = profile
+        .bands
+        .iter()
+        .map(|band| raw::HptfBand {
+            size: size::<raw::HptfBand>(),
+            kind: band.kind.code(),
+            enabled: i32::from(band.enabled),
+            reserved: 0,
+            fc_hz: band.fc_hz,
+            gain_db: band.gain_db,
+            q: band.q,
+        })
+        .collect();
+    let count =
+        u32::try_from(bands.len()).map_err(|_| "Too many filter bands to submit".to_owned())?;
+    Ok((bands, count))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,22 +1161,44 @@ impl Control {
     /// it is a state to display, not a failure. Parsing and coefficient design
     /// run synchronously here, so a bad file fails on this thread and never
     /// reaches the audio callback.
+    ///
+    /// With a right profile of its own each ear gets its file, both in one
+    /// revision: a failure leaves the previous pair running, never one new ear.
     pub fn set_hptf(&self, settings: &HptfSettings, revision: u64) -> Result<bool, String> {
         let s = &self.inner;
         let profile = string(&settings.profile)?;
-        let raw = raw::HptfConfig {
-            size: size::<raw::HptfConfig>(),
-            profile: profile.as_ptr(),
-            preamp_mode: i32::from(settings.auto_trim),
-            reserved: 0,
-            revision,
-        };
+        let right = settings.right.as_deref().map(string).transpose()?;
         let mut error = std::ptr::null_mut();
-        // SAFETY: the Arc retains the output and the config lives through this
-        // call. Preparation supports concurrent producer/control calls and owns
-        // its error string, so neither native nor Rust's gate spans file I/O.
-        let code = unsafe {
-            (s.api.adm_scene_output_set_hptf_ex)(s.output, &raw const raw, &raw mut error)
+        let code = if let Some(right) = &right {
+            let raw = raw::HptfStereoConfig {
+                size: size::<raw::HptfStereoConfig>(),
+                preamp_mode: i32::from(settings.auto_trim),
+                left: profile.as_ptr(),
+                right: right.as_ptr(),
+                revision,
+            };
+            // SAFETY: as below; both paths live through this call.
+            unsafe {
+                (s.api.adm_scene_output_set_hptf_stereo_ex)(
+                    s.output,
+                    &raw const raw,
+                    &raw mut error,
+                )
+            }
+        } else {
+            let raw = raw::HptfConfig {
+                size: size::<raw::HptfConfig>(),
+                profile: profile.as_ptr(),
+                preamp_mode: i32::from(settings.auto_trim),
+                reserved: 0,
+                revision,
+            };
+            // SAFETY: the Arc retains the output and the config lives through this
+            // call. Preparation supports concurrent producer/control calls and owns
+            // its error string, so neither native nor Rust's gate spans file I/O.
+            unsafe {
+                (s.api.adm_scene_output_set_hptf_ex)(s.output, &raw const raw, &raw mut error)
+            }
         };
         let message = copy_text(error);
         // SAFETY: the _ex entrypoint transfers ownership, including on failure.
@@ -1139,25 +1226,10 @@ impl Control {
         revision: u64,
     ) -> Result<bool, String> {
         let s = &self.inner;
-        // Every element carries the stride, because the renderer walks an array
-        // it did not allocate and a newer caller may append fields.
-        let bands: Vec<raw::HptfBand> = profile
-            .bands
-            .iter()
-            .map(|band| raw::HptfBand {
-                size: size::<raw::HptfBand>(),
-                kind: band.kind.code(),
-                enabled: i32::from(band.enabled),
-                reserved: 0,
-                fc_hz: band.fc_hz,
-                gain_db: band.gain_db,
-                q: band.q,
-            })
-            .collect();
+        let (bands, band_count) = raw_bands(profile)?;
         let raw = raw::HptfParameters {
             size: size::<raw::HptfParameters>(),
-            band_count: u32::try_from(bands.len())
-                .map_err(|_| "Too many filter bands to submit".to_owned())?,
+            band_count,
             bands: bands.as_ptr(),
             preamp_db: profile.preamp_db,
             preamp_mode: i32::from(auto_trim),
@@ -1174,30 +1246,69 @@ impl Control {
         }
         s.error(code, 2).map(|()| true)
     }
-    /// The compensation the output is running now, or the disabled default when
-    /// this output cannot carry one.
+    /// A cascade for each ear, held in memory, applied as one revision.
+    ///
+    /// Same acceptance, crossfade and `Ok(false)` as
+    /// [`Control::set_hptf_parameters`]. The automatic trim is common to both
+    /// ears, so an ear with no bands and a 0 dB preamp still takes it.
+    pub fn set_hptf_stereo_parameters(
+        &self,
+        left: &HptfProfile,
+        right: &HptfProfile,
+        auto_trim: bool,
+        revision: u64,
+    ) -> Result<bool, String> {
+        let s = &self.inner;
+        let (left_bands, left_count) = raw_bands(left)?;
+        let (right_bands, right_count) = raw_bands(right)?;
+        let raw = raw::HptfStereoParameters {
+            size: size::<raw::HptfStereoParameters>(),
+            preamp_mode: i32::from(auto_trim),
+            left_count,
+            right_count,
+            left_bands: left_bands.as_ptr(),
+            right_bands: right_bands.as_ptr(),
+            left_preamp_db: left.preamp_db,
+            right_preamp_db: right.preamp_db,
+            revision,
+        };
+        let _guard = s.gate.lock().unwrap();
+        // SAFETY: the Arc retains the output, and the snapshot plus both band
+        // arrays live until this synchronous call returns; nothing is retained.
+        let code = unsafe {
+            (s.api.adm_scene_output_set_hptf_stereo_parameters)(s.output, &raw const raw)
+        };
+        if code == UNSUPPORTED {
+            return Ok(false);
+        }
+        s.error(code, 2).map(|()| true)
+    }
+    /// The compensation the output is running now, ear by ear, or the disabled
+    /// default when this output cannot carry one.
+    ///
+    /// Always the per-ear query: the single-profile one refuses to answer once
+    /// the two ears differ.
     pub fn hptf_status(&self) -> Result<HptfStatus, String> {
         let s = &self.inner;
         let _guard = s.gate.lock().unwrap();
-        let mut info = raw::HptfInfo {
-            size: size::<raw::HptfInfo>(),
+        // Only the outer size is set; the two embedded records are the
+        // renderer's to describe.
+        let mut info = raw::HptfStereoInfo {
+            size: size::<raw::HptfStereoInfo>(),
             ..Default::default()
         };
         // SAFETY: the Arc retains the output, and the struct is written whole
         // before this synchronous call returns.
-        let code = unsafe { (s.api.adm_scene_output_get_hptf_info)(s.output, &raw mut info) };
+        let code =
+            unsafe { (s.api.adm_scene_output_get_hptf_stereo_info)(s.output, &raw mut info) };
         if code == UNSUPPORTED {
             return Ok(HptfStatus::default());
         }
         s.error(code, 2)?;
         Ok(HptfStatus {
-            enabled: info.enabled != 0,
-            bands: info.band_count,
-            rate: info.sample_rate,
-            preamp_db: info.preamp_db,
-            auto_trim_db: info.auto_trim_db,
-            max_response_db: info.max_response_db,
-            applied_revision: info.applied_revision,
+            left: HptfEar::of(&info.left),
+            right: HptfEar::of(&info.right),
+            applied_revision: info.left.applied_revision,
         })
     }
     pub fn status(&self) -> Result<Status, String> {
@@ -1437,6 +1548,9 @@ mod tests {
             size_of::<raw::HptfBand>(),
             size_of::<raw::HptfParameters>(),
             size_of::<raw::Diagnostic>(),
+            size_of::<raw::HptfStereoConfig>(),
+            size_of::<raw::HptfStereoParameters>(),
+            size_of::<raw::HptfStereoInfo>(),
         ];
         for (index, size) in sizes.into_iter().enumerate() {
             // SAFETY: probe is built from the upstream header and returns a scalar.
@@ -1475,6 +1589,13 @@ mod tests {
             std::mem::offset_of!(raw::HptfParameters, revision),
             std::mem::offset_of!(raw::Diagnostic, message),
             std::mem::offset_of!(raw::Diagnostic, code),
+            std::mem::offset_of!(raw::HptfStereoConfig, right),
+            std::mem::offset_of!(raw::HptfStereoConfig, revision),
+            std::mem::offset_of!(raw::HptfStereoParameters, right_bands),
+            std::mem::offset_of!(raw::HptfStereoParameters, right_preamp_db),
+            std::mem::offset_of!(raw::HptfStereoParameters, revision),
+            std::mem::offset_of!(raw::HptfStereoInfo, left),
+            std::mem::offset_of!(raw::HptfStereoInfo, right),
         ];
         for (index, offset) in offsets.into_iter().enumerate() {
             // SAFETY: C's offsetof probe returns a scalar from the pinned headers.
