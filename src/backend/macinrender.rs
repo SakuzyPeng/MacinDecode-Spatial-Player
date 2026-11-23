@@ -1839,6 +1839,118 @@ mod tests {
         assert!(validate_source(&settings, &config(44_100)).is_ok());
     }
 
+    /// The room view draws an object where `RoomView::place` puts it, which
+    /// transcribes the renderer's own placement. This holds the transcription
+    /// to the renderer: every source, at both kinds of scene unit, against
+    /// where the renderer itself says it placed it.
+    #[test]
+    fn the_room_view_places_every_source_where_the_room_renderer_does() {
+        use crate::room_package::RoomGeometry;
+        use crate::scene3d::room::RoomView;
+
+        let manifest = std::path::Path::new(env!("MACINRENDER_CORE_SOURCE"))
+            .join("tests/fixtures/room/synthetic/room.json");
+        let geometry = RoomGeometry::read(&manifest).unwrap();
+        // ADM: x right, y front, z up. In front, beyond a corner, under the
+        // floor, overhead, up to the left, at the ears, and head-locked.
+        let sources: [([f32; 3], bool); 7] = [
+            ([0.0, 1.0, 0.0], false),
+            ([1.0, 1.0, 0.0], false),
+            ([0.3, -1.0, -1.0], false),
+            ([0.0, 0.0, 1.0], false),
+            ([-1.0, 0.2, 1.0], false),
+            ([0.0, 0.0, 0.0], false),
+            ([0.5, 0.5, -0.5], true),
+        ];
+        for metres_per_unit in [None, Some(1.5), Some(4.0)] {
+            let renderer = native::RendererSettings {
+                binaural: true,
+                speaker_renderer: native::SpeakerRenderer::SafVbap,
+                layout: "4+7+0".into(),
+                sofa: String::new(),
+                split_lfe: false,
+                room: Some(native::RoomSettings {
+                    manifest: manifest.to_str().unwrap().to_owned(),
+                    hrir: String::new(),
+                    metres_per_unit,
+                    screens: None,
+                }),
+            };
+            let mut session = native::Session::new(&native::Config {
+                renderer,
+                output: native::OutputKind::Null,
+                device_id: String::new(),
+                input_rate: 48_000,
+            })
+            .unwrap();
+            let ids: Vec<u64> = (1..=7).collect();
+            session.reset(1, 0).unwrap();
+            session.configure(1, 1, &ids, None).unwrap();
+            let control = session.control();
+            control.play(true).unwrap();
+            let initial: Vec<_> = sources
+                .iter()
+                .zip(&ids)
+                .map(|(&(position, head_locked), &id)| {
+                    (
+                        id,
+                        native::ObjectState {
+                            active: true,
+                            gain: 1.0,
+                            position: Some(position),
+                            head_locked,
+                            screen_reference: None,
+                        },
+                    )
+                })
+                .collect();
+            let samples = [0.01_f32; 1024];
+            let planes: Vec<_> = ids
+                .iter()
+                .map(|&element| native::Plane {
+                    element,
+                    samples: &samples,
+                })
+                .collect();
+            let frame = native::Frame {
+                epoch: 1,
+                generation: 1,
+                start: 0,
+                duration: 1024,
+                complete: true,
+                planes: &planes,
+                initial: &initial,
+                updates: &[],
+            };
+            assert!(session.submit(&frame).unwrap());
+            session.end(1, 1024).unwrap();
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while control.status().unwrap().phase != native::Phase::Ended {
+                assert_ne!(control.status().unwrap().phase, native::Phase::Failed);
+                assert!(Instant::now() < deadline, "the room never ended");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+
+            let view = RoomView::new(&geometry, metres_per_unit);
+            for (&(position, head_locked), &id) in sources.iter().zip(&ids) {
+                let heard = control
+                    .room_source(id)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("source {id} was not placed"));
+                let [x, y, z] = position;
+                let drawn = view.place([x, z, -y], head_locked, false);
+                let expected = view.world(heard.position);
+                for axis in 0..3 {
+                    assert!(
+                        (drawn[axis] - expected[axis]).abs() < 1e-5,
+                        "{metres_per_unit:?}, source {id} at {position:?}: \
+                         drawn {drawn:?}, heard at {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn equal_power_scene_submission_preserves_two_audible_lfes() {
         use crate::decoder::{FIELD_GAIN, SceneLfePcm};

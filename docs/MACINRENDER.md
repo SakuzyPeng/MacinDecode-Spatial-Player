@@ -169,8 +169,13 @@ AC-4 Scene 的 `screen_factor` 按 Core 的 ADM 导出规则转换成 `screenRef
   `tests/fixtures/room/synthetic`（构建脚本经 `MACINRENDER_CORE_SOURCE` 交给测试），在定时 null 输出上
   覆盖创建、对象与 LFE、自动与固定比例、播放中与暂停时换房、缺失的包和 44.1 kHz 的拒绝。
 
-房间视图仍在播放器里按上游规则重算放置；`adm_scene_stream_room_source_json` 能给出渲染器实际受限后的
-坐标，换成读取它是后续的改进。
+房间视图仍在播放器里按上游规则重算放置，因为画面要对齐设备的呈现位置：`Control::room_source` 包装的
+`adm_scene_stream_room_source_json` 是渲染线程每渲染完一块后取的快照，时刻是那一块的末尾，比正在听到的
+超前一个输出队列，而 JSON 里不带这个时刻，播放器无法把它对回呈现位置。所以它只用来核对：
+`backend::macinrender::tests::the_room_view_places_every_source_where_the_room_renderer_does` 在合成房间里
+放 7 个声源（正前、越过墙角、地板以下、头顶、左上、耳朵处、头部锁定），在自动、1.5 m、4.0 m 三种比例下
+渲染到结束，要求 `RoomView::place` 与渲染器给出的位置相差不超过 1e-5 世界单位（比例偏 1% 即失败）。
+上游若在快照里带上它对应的采样位置，就可以按呈现位置直接读取。
 
 ## 耳机补偿（HpTF）
 

@@ -139,18 +139,11 @@ fn a_saf_session_renders_no_room() {
     })
     .unwrap();
     assert_eq!(session.control().try_room_status().unwrap(), None);
+    assert_eq!(session.control().room_source(1).unwrap(), None);
 }
 
 #[test]
 fn room_screen_mapping_moves_only_the_referenced_source() {
-    unsafe extern "C" {
-        fn adm_scene_stream_room_source_json(
-            stream: *const c_void,
-            element: u64,
-            json: *mut *mut c_char,
-        ) -> i32;
-    }
-
     let mut renderer = room(Some(1.0));
     renderer.room.as_mut().unwrap().screens = Some(serde_json::json!({
         "schema": "mradm.screen-config",
@@ -207,22 +200,16 @@ fn room_screen_mapping_moves_only_the_referenced_source() {
         std::thread::sleep(Duration::from_millis(2));
     }
     let [mapped, fixed] = [1, 2].map(|element| {
-        let mut json = std::ptr::null_mut();
-        let shared = &control.inner;
-        // SAFETY: the control owns the stream. The result string is transferred here.
-        let code =
-            unsafe { adm_scene_stream_room_source_json(shared.stream, element, &raw mut json) };
-        assert_eq!(code, 0);
-        let text = copy_text(json);
-        // SAFETY: the call transferred ownership of the string.
-        unsafe { (shared.api.adm_free_string)(json) };
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["present"], true);
-        let direction = &value["direction"];
-        (-direction[1].as_f64().unwrap())
-            .atan2(direction[0].as_f64().unwrap())
+        let source = control
+            .room_source(element)
+            .unwrap()
+            .expect("a placed source");
+        (-source.direction[1])
+            .atan2(source.direction[0])
             .to_degrees()
     });
+    // Neither element 3 nor a session without a room has a place.
+    assert_eq!(control.room_source(3).unwrap(), None);
     assert!((mapped - 45.0).abs() < 1e-4, "{mapped}");
     assert!((fixed - 29.0).abs() < 1e-4, "{fixed}");
 }

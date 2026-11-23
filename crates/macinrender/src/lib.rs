@@ -218,6 +218,63 @@ impl RoomStatus {
     }
 }
 
+/// Where the room renderer last placed one source, after pulling it inside
+/// the walls: the position it is heard from.
+///
+/// A snapshot the render worker takes after each block it renders, at that
+/// block's end. That is ahead of what is being heard by the output's queue,
+/// and the renderer does not say by how much.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoomSource {
+    /// Room coordinates in metres from the corner: x front to back, y right
+    /// to left, z up. A head-locked source's are in the head's frame.
+    pub position: [f64; 3],
+    /// Unit direction from the listener, in the same axes.
+    pub direction: [f64; 3],
+    pub distance: f64,
+    /// Whether a wall or the minimum distance moved it from where the Scene
+    /// asked.
+    pub constrained: bool,
+}
+
+impl RoomSource {
+    /// `None` for a source the renderer has not placed: unknown to it,
+    /// inactive, or not yet rendered.
+    fn parse(json: &str) -> Result<Option<Self>, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| format!("Room source: {error}"))?;
+        if value.get("present").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Ok(None);
+        }
+        let triple = |key: &str| -> Result<[f64; 3], String> {
+            let values = value
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .filter(|values| values.len() == 3)
+                .ok_or_else(|| format!("Room source: no {key}"))?;
+            let mut out = [0.0; 3];
+            for (slot, value) in out.iter_mut().zip(values) {
+                *slot = value
+                    .as_f64()
+                    .ok_or_else(|| format!("Room source: {key} is not numeric"))?;
+            }
+            Ok(out)
+        };
+        Ok(Some(Self {
+            position: triple("position_metres")?,
+            direction: triple("direction")?,
+            distance: value
+                .get("distance_metres")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or("Room source: no distance")?,
+            constrained: value
+                .get("constrained")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        }))
+    }
+}
+
 impl RendererSettings {
     fn room(&self) -> Option<&RoomSettings> {
         self.room.as_ref().filter(|_| self.binaural)
@@ -1010,6 +1067,24 @@ impl Control {
             0 => RoomStatus::parse(&text).map(Some),
             UNSUPPORTED => Ok(None),
             _ => Err(format!("MacinRender room status error {code}")),
+        }
+    }
+
+    /// Where the room renderer last placed the Scene element `element`; see
+    /// [`RoomSource`]. `None` outside a room session too.
+    pub fn room_source(&self, element: u64) -> Result<Option<RoomSource>, String> {
+        let s = &self.inner;
+        let mut json = std::ptr::null_mut();
+        // SAFETY: the Arc retains the stream; the source string is owned by the caller.
+        let code =
+            unsafe { (s.api.adm_scene_stream_room_source_json)(s.stream, element, &raw mut json) };
+        let text = copy_text(json);
+        // SAFETY: ownership was transferred; NULL is permitted.
+        unsafe { (s.api.adm_free_string)(json) };
+        match code {
+            0 => RoomSource::parse(&text),
+            UNSUPPORTED => Ok(None),
+            _ => Err(format!("MacinRender room source error {code}")),
         }
     }
     /// Load, replace or (with an empty profile) disable headphone compensation.

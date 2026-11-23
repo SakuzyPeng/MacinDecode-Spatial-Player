@@ -92,5 +92,6 @@ api! {
     ) -> i32;
     adm_scene_stream_switch_room(*const c_void, *const raw::RoomConfig, *mut u64, *mut *mut c_char) -> i32;
     adm_scene_stream_room_status_json(*const c_void, *mut *mut c_char) -> i32;
+    adm_scene_stream_room_source_json(*const c_void, u64, *mut *mut c_char) -> i32;
     adm_free_string(*mut c_char) -> ();
 }
