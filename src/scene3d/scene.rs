@@ -14,6 +14,7 @@ use super::figure::{Figure, PartTone, Stance};
 use super::mesh::{ArrowSpec, Layer, MeshBuilder, Rgb, ViewContext, shade_face};
 use super::params;
 use super::room::{GridWeight, RoomView};
+use super::switch::{InRoom, Stages, mix, mix3};
 
 /// Horizontal room extents. Logic uses a square footprint but a lower ceiling.
 const ROOM_HALF_WIDTH: f32 = params::ROOM_WIDTH / 2.0;
@@ -81,30 +82,58 @@ pub struct SceneInput<'a> {
     /// The room renderer's modelled room. With one, the frame is drawn in it
     /// at its own proportions instead of in the panner's box: objects where
     /// the room makes them sound, the listener seated, and no LFE, which the
-    /// room renderer gives no place.
-    pub room: Option<&'a RoomView>,
+    /// room renderer gives no place. Its progress is how far the switch from
+    /// the box into it has gone; see [`super::switch`].
+    pub room: Option<InRoom<'a>>,
 }
 
 /// Where an object at a listener-space position is drawn: in the panner's box,
 /// or where the room renderer makes it sound. The cube, its drop line, its
 /// footprint, its trail and its nameplate all ask here, so none of them can
 /// disagree with another about where the object is.
+///
+/// Partway through the switch between the two, the object is on its way from
+/// one to the other. A head-locked object is turned with the head in both, so
+/// it travels straight rather than swinging round.
 #[must_use]
 pub fn object_position(
     object: &SceneObject<'_>,
     position: [f32; 3],
-    room: Option<&RoomView>,
+    room: Option<InRoom<'_>>,
 ) -> [f32; 3] {
-    room.map_or_else(
-        || object_world_position(position),
-        |room| room.place(position, object.head_locked, object.screen_reference),
-    )
+    let Some(InRoom {
+        view: room,
+        progress,
+    }) = room
+    else {
+        return object_world_position(position);
+    };
+    let placed = room.place(position, object.head_locked, object.screen_reference);
+    let morph = Stages::at(progress).morph;
+    if morph >= 1.0 {
+        return placed;
+    }
+    let boxed = object_world_position(if object.head_locked {
+        room.turned_with_head(position)
+    } else {
+        position
+    });
+    mix3(boxed, placed, morph)
 }
 
-/// The floor objects drop their lines and footprints onto.
-fn floor_of(room: Option<&RoomView>) -> f32 {
-    room.map_or(FLOOR_Y, RoomView::floor_y)
+/// The floor objects drop their lines and footprints onto, and the listener
+/// stands on.
+fn floor_of(room: Option<InRoom<'_>>) -> f32 {
+    room.map_or(FLOOR_Y, |room| {
+        mix(FLOOR_Y, room.view.floor_y(), room.stages().morph)
+    })
 }
+
+/// The ordinary scene's room: the panner's box.
+const PANNER_BOX: ([f32; 3], [f32; 3]) = (
+    [-ROOM_HALF_WIDTH, FLOOR_Y, -ROOM_HALF_DEPTH],
+    [ROOM_HALF_WIDTH, CEILING_Y, ROOM_HALF_DEPTH],
+);
 
 /// Build one frame of geometry into `mesh`, which is cleared first.
 pub fn build(
@@ -122,16 +151,11 @@ pub fn build(
         stage: Rgb::from_color32(theme::STAGE),
     };
 
-    let stance = if let Some(room) = input.room {
-        add_room_view(mesh, room, &view);
-        let stance = room.stance();
-        for part in stance.seat(room.floor_y()) {
-            mesh.add_oriented_box(part.centre, part.size, part.axes, seat_colour(), &view);
-        }
-        stance
+    let stance = if let Some(inside) = input.room {
+        add_switching_room(mesh, inside, &view)
     } else {
-        add_room(mesh, &view);
-        add_floor_grid(mesh, &view);
+        add_panner_box(mesh, PANNER_BOX, 0.0, &view);
+        add_floor_grid(mesh, |point| point, 0.0, &view);
         Stance::standing(FLOOR_Y)
     };
     if let Some(skin) = input.skin {
@@ -140,15 +164,20 @@ pub fn build(
         add_figure(mesh, input.figure, stance, &view);
     }
     // The room renderer gives the LFE no position, so only the panner's box
-    // has a slot for it.
-    if input.room.is_none() {
+    // has a slot for it, and the switch into the room shrinks it away.
+    let lfe_size = input.room.map_or(1.0, |room| 1.0 - room.stages().morph);
+    if lfe_size > 0.0 {
         for index in 0..input.lfe_count.max(1) {
             add_lfe_slot(
                 mesh,
-                input.has_lfe,
-                input.show_element_numbers,
-                index,
-                input.lfe_count,
+                LfeSlot {
+                    present: input.has_lfe,
+                    show_number: input.show_element_numbers,
+                    index,
+                    count: input.lfe_count,
+                    size: lfe_size,
+                    floor: floor_of(input.room),
+                },
                 &view,
             );
         }
@@ -227,21 +256,39 @@ pub fn lfe_destination_position(index: usize, count: usize) -> [f32; 3] {
     position
 }
 
-fn add_lfe_slot(
-    mesh: &mut MeshBuilder,
+/// One LFE cabinet to draw, and how much of it is left while the switch into
+/// the room shrinks it away.
+#[derive(Debug, Clone, Copy)]
+struct LfeSlot {
     present: bool,
     show_number: bool,
     index: usize,
     count: usize,
-    view: &ViewContext,
-) {
+    /// `1.0` in the panner's box.
+    size: f32,
+    /// The floor it shrinks onto.
+    floor: f32,
+}
+
+fn add_lfe_slot(mesh: &mut MeshBuilder, slot: LfeSlot, view: &ViewContext) {
+    let LfeSlot {
+        present,
+        show_number,
+        index,
+        count,
+        ..
+    } = slot;
     let width = params::LFE_SLAB_WIDTH;
     let height = params::LFE_SLAB_HEIGHT;
     let depth = height * 0.65;
     let object_colour = Rgb::from_color32(theme::ACCENT);
-    let centre = lfe_destination_position(index, count);
+    let mut centre = lfe_destination_position(index, count);
 
-    let size = [width, height, depth];
+    let mut size = [width, height, depth];
+    if slot.size < 1.0 {
+        size = size.map(|edge| edge * slot.size);
+        centre[1] = slot.floor + size[1] / 2.0;
+    }
     if present {
         mesh.add_box(centre, size, object_colour, view);
         if show_number {
@@ -260,15 +307,105 @@ fn add_lfe_slot(
 
 /// The twelve edges of the low rectangular room, as hairlines. This is the
 /// theme's 1px card border promoted into three dimensions.
-fn add_room(mesh: &mut MeshBuilder, view: &ViewContext) {
-    let colour = Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25);
+///
+/// Given its corners, because the switch into the room view carries the box
+/// onto the unit box, and how far it has faded into the stage, because it
+/// hands over to that dashed box there.
+fn add_panner_box(
+    mesh: &mut MeshBuilder,
+    (low, high): ([f32; 3], [f32; 3]),
+    fade: f32,
+    view: &ViewContext,
+) {
+    let colour = faded(
+        Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25),
+        fade,
+        view,
+    );
     mesh.add_wire_box(
-        [0.0, f32::midpoint(FLOOR_Y, CEILING_Y), 0.0],
-        [params::ROOM_WIDTH, params::ROOM_HEIGHT, params::ROOM_DEPTH],
+        std::array::from_fn(|axis| f32::midpoint(low[axis], high[axis])),
+        std::array::from_fn(|axis| high[axis] - low[axis]),
         colour,
         params::HAIRLINE_POINTS,
         view,
     );
+}
+
+/// A colour `fade` of the way into the stage, and exactly itself at none.
+fn faded(colour: Rgb, fade: f32, view: &ViewContext) -> Rgb {
+    if fade <= 0.0 {
+        colour
+    } else {
+        colour.lerp(view.stage, fade)
+    }
+}
+
+/// The room view, as far into it as the switch has gone, and the listener's
+/// stance there. Settled, it is the room view and nothing else.
+fn add_switching_room(mesh: &mut MeshBuilder, inside: InRoom<'_>, view: &ViewContext) -> Stance {
+    let room = inside.view;
+    let stages = inside.stages();
+    let floor = floor_of(Some(inside));
+    if stages.rise < 1.0 {
+        // The box travels onto the unit box, then hands over to it.
+        let (unit_low, unit_high) = room.unit_bounds();
+        let (low, high) = PANNER_BOX;
+        add_panner_box(
+            mesh,
+            (
+                mix3(low, unit_low, stages.morph),
+                mix3(high, unit_high, stages.morph),
+            ),
+            stages.rise,
+            view,
+        );
+    }
+    if stages.morph < 1.0 {
+        // The ruler goes with the floor onto the room's, fading as it goes, so
+        // the room's own can take over.
+        let (room_low, room_high) = room.bounds();
+        let (low, high) = PANNER_BOX;
+        let onto = |[x, _, z]: [f32; 3]| {
+            let across = |value: f32, axis: usize| {
+                let share = (value - low[axis]) / (high[axis] - low[axis]);
+                mix(
+                    value,
+                    share.mul_add(room_high[axis] - room_low[axis], room_low[axis]),
+                    stages.morph,
+                )
+            };
+            [across(x, 0), floor, across(z, 2)]
+        };
+        add_floor_grid(mesh, onto, stages.morph, view);
+    }
+    if stages.rise > 0.0 {
+        add_room_view(mesh, room, stages.rise, view);
+    }
+    let seated = room.stance();
+    if stages.seat > 0.0 {
+        for part in seated.seat(room.floor_y()) {
+            let (centre, size) = grown(part.centre, part.size, stages.seat, room.floor_y());
+            mesh.add_oriented_box(centre, size, part.axes, seat_colour(), view);
+        }
+    }
+    let standing = Stance::standing(FLOOR_Y);
+    let standing = Stance::standing_at(floor, mix(standing.unit, seated.unit, stages.morph));
+    Stance::sitting(standing, seated, stages.sit, floor)
+}
+
+/// A box `amount` of its size, grown up from the floor beneath the listener.
+fn grown(centre: [f32; 3], size: [f32; 3], amount: f32, floor: f32) -> ([f32; 3], [f32; 3]) {
+    if amount >= 1.0 {
+        return (centre, size);
+    }
+    (
+        [
+            centre[0] * amount,
+            (centre[1] - floor).mul_add(amount, floor),
+            centre[2] * amount,
+        ],
+        size.map(|edge| edge * amount),
+    )
 }
 
 /// The modelled room, cut away towards the camera.
@@ -278,9 +415,29 @@ fn add_room(mesh: &mut MeshBuilder, view: &ViewContext) {
 /// treatment their absorption reads as. Then the metric floor ruler, the
 /// room's twelve edges, and the Scene's unit box — the panner's whole room —
 /// sized by the scene unit, with whatever part of it the walls cut off marked.
-fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, view: &ViewContext) {
-    let bare = view.stage.lerp(Rgb::from_color32(theme::BORDER), 0.5);
-    let fabric = Rgb::from_color32(theme::ACCENT_SOFT).lerp(Rgb::from_color32(theme::MUTED), 0.18);
+///
+/// `rise` is how far up from its floor the room has grown, and out of the
+/// stage it has come, while the switch builds it; `1.0` is the room.
+fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, rise: f32, view: &ViewContext) {
+    let fade = 1.0 - rise;
+    let floor = room.floor_y();
+    let lift = |point: [f32; 3]| {
+        if rise >= 1.0 {
+            point
+        } else {
+            [point[0], (point[1] - floor).mul_add(rise, floor), point[2]]
+        }
+    };
+    let bare = faded(
+        view.stage.lerp(Rgb::from_color32(theme::BORDER), 0.5),
+        fade,
+        view,
+    );
+    let fabric = faded(
+        Rgb::from_color32(theme::ACCENT_SOFT).lerp(Rgb::from_color32(theme::MUTED), 0.18),
+        fade,
+        view,
+    );
     for surface in Surface::ALL {
         if !RoomView::shows_inner_face(surface, view.direction) {
             continue;
@@ -296,17 +453,36 @@ fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, view: &ViewContext) {
             mesh.add_surface(
                 corners,
                 inward,
-                view.stage.lerp(Rgb::from_color32(theme::MUTED), tone),
+                faded(
+                    view.stage.lerp(Rgb::from_color32(theme::MUTED), tone),
+                    fade,
+                    view,
+                ),
                 view,
             );
             continue;
         }
-        mesh.add_surface(room.corners(surface), inward, bare, view);
+        mesh.add_surface(room.corners(surface).map(lift), inward, bare, view);
         for panel in room.panels(surface) {
-            mesh.add_box(panel.centre, panel.size, fabric, view);
+            let mut size = panel.size;
+            if rise < 1.0 {
+                size[1] *= rise;
+            }
+            mesh.add_box(lift(panel.centre), size, fabric, view);
         }
     }
+    add_room_lines(mesh, room, fade, lift, view);
+}
 
+/// The room view's lines: the floor ruler, the room's edges lifted with its
+/// walls, and the unit box.
+fn add_room_lines(
+    mesh: &mut MeshBuilder,
+    room: &RoomView,
+    fade: f32,
+    lift: impl Fn([f32; 3]) -> [f32; 3],
+    view: &ViewContext,
+) {
     let faint = Rgb::from_color32(theme::BORDER).lerp(
         Rgb::from_color32(theme::MUTED),
         params::FLOOR_GRID_CONTRAST * 0.6,
@@ -317,16 +493,40 @@ fn add_room_view(mesh: &mut MeshBuilder, room: &RoomView, view: &ViewContext) {
             GridWeight::Metre => (faint.lerp(view.ink, 0.22), params::HAIRLINE_POINTS),
             GridWeight::Half => (faint, params::HAIRLINE_POINTS * 0.6),
         };
-        mesh.add_line(Layer::Decal, line.from, line.to, colour, width, view);
+        mesh.add_line(
+            Layer::Decal,
+            line.from,
+            line.to,
+            faded(colour, fade, view),
+            width,
+            view,
+        );
     }
 
-    let edge = Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25);
+    let edge = faded(
+        Rgb::from_color32(theme::BORDER).lerp(view.ink, 0.25),
+        fade,
+        view,
+    );
     for (from, to) in room.edges() {
-        mesh.add_line(Layer::Line, from, to, edge, params::HAIRLINE_POINTS, view);
+        mesh.add_line(
+            Layer::Line,
+            lift(from),
+            lift(to),
+            edge,
+            params::HAIRLINE_POINTS,
+            view,
+        );
     }
 
-    let reachable = Rgb::from_color32(theme::MUTED).lerp(view.ink, 0.15);
-    let cut = Rgb::from_color32(theme::WARNING);
+    // The unit box is not lifted: it is the panner's box, already where the
+    // switch carried it, coming out of the stage as the box goes into it.
+    let reachable = faded(
+        Rgb::from_color32(theme::MUTED).lerp(view.ink, 0.15),
+        fade,
+        view,
+    );
+    let cut = faded(Rgb::from_color32(theme::WARNING), fade, view);
     for segment in room.unit_box() {
         if segment.reachable {
             add_dashed(mesh, segment.from, segment.to, reachable, view);
@@ -379,14 +579,26 @@ fn add_dashed(
 /// centre axes heaviest, quarter lines medium when the ruler is dense enough,
 /// and the rest faint — so an object's footprint can be read off the grid instead
 /// of merely sitting on hatching.
-fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
+///
+/// `place` and `fade` carry it onto the room view's floor, and out of the
+/// stage, while the switch into the room goes on.
+fn add_floor_grid(
+    mesh: &mut MeshBuilder,
+    place: impl Fn([f32; 3]) -> [f32; 3],
+    fade: f32,
+    view: &ViewContext,
+) {
     let divisions = params::ROOM_GRID_DIVISIONS;
-    let faint = Rgb::from_color32(theme::BORDER).lerp(
-        Rgb::from_color32(theme::MUTED),
-        params::FLOOR_GRID_CONTRAST * 0.6,
+    let faint = faded(
+        Rgb::from_color32(theme::BORDER).lerp(
+            Rgb::from_color32(theme::MUTED),
+            params::FLOOR_GRID_CONTRAST * 0.6,
+        ),
+        fade,
+        view,
     );
-    let major = faint.lerp(view.ink, 0.22);
-    let axis = faint.lerp(view.ink, 0.45);
+    let major = faded(faint.lerp(view.ink, 0.22), fade, view);
+    let axis = faded(faint.lerp(view.ink, 0.45), fade, view);
 
     for step in 0..=divisions {
         let fraction = f32::from(u16::try_from(step).unwrap_or(u16::MAX))
@@ -404,16 +616,16 @@ fn add_floor_grid(mesh: &mut MeshBuilder, view: &ViewContext) {
         };
         mesh.add_line(
             Layer::Decal,
-            [x, FLOOR_Y, -ROOM_HALF_DEPTH],
-            [x, FLOOR_Y, ROOM_HALF_DEPTH],
+            place([x, FLOOR_Y, -ROOM_HALF_DEPTH]),
+            place([x, FLOOR_Y, ROOM_HALF_DEPTH]),
             colour,
             width,
             view,
         );
         mesh.add_line(
             Layer::Decal,
-            [-ROOM_HALF_WIDTH, FLOOR_Y, z],
-            [ROOM_HALF_WIDTH, FLOOR_Y, z],
+            place([-ROOM_HALF_WIDTH, FLOOR_Y, z]),
+            place([ROOM_HALF_WIDTH, FLOOR_Y, z]),
             colour,
             width,
             view,
@@ -435,7 +647,7 @@ fn add_object(
     object: &SceneObject<'_>,
     show_label: bool,
     show_loudness: bool,
-    room: Option<&RoomView>,
+    room: Option<InRoom<'_>>,
     view: &ViewContext,
 ) {
     let [x, y, z] = object_position(object, object.position, room);
@@ -718,7 +930,7 @@ fn add_trail(
     mesh: &mut MeshBuilder,
     object: &SceneObject<'_>,
     show_loudness: bool,
-    room: Option<&RoomView>,
+    room: Option<InRoom<'_>>,
     view: &ViewContext,
 ) {
     let Ok(count) = u16::try_from(object.trail.len()) else {
@@ -1167,7 +1379,7 @@ mod tests {
     fn in_room<'a>(room: &'a RoomView, objects: &'a [SceneObject<'a>]) -> MeshBuilder {
         with_input(SceneInput {
             objects,
-            room: Some(room),
+            room: Some(InRoom::settled(room)),
             ..SceneInput::default()
         })
     }
@@ -1177,7 +1389,7 @@ mod tests {
         let room = reference_room();
         let without = in_room(&room, &[]);
         let with = with_input(SceneInput {
-            room: Some(&room),
+            room: Some(InRoom::settled(&room)),
             has_lfe: true,
             lfe_count: 2,
             show_element_numbers: true,
@@ -1228,6 +1440,130 @@ mod tests {
         for vertex in &one.decal[empty.decal.len()..] {
             assert!((vertex.position[1] - room.floor_y()).abs() < 1e-6);
         }
+    }
+
+    fn same_mesh(a: &MeshBuilder, b: &MeshBuilder) -> bool {
+        let same = |a: &[Vertex], b: &[Vertex]| {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| {
+                    a.position.map(f32::to_bits) == b.position.map(f32::to_bits)
+                        && a.colour == b.colour
+                })
+        };
+        same(&a.solid, &b.solid)
+            && same(&a.line, &b.line)
+            && same(&a.decal, &b.decal)
+            && a.transparent.len() == b.transparent.len()
+    }
+
+    fn switching<'a>(
+        room: &'a RoomView,
+        progress: f32,
+        objects: &'a [SceneObject<'a>],
+    ) -> MeshBuilder {
+        with_input(SceneInput {
+            objects,
+            has_lfe: true,
+            lfe_count: 1,
+            show_element_numbers: true,
+            room: Some(InRoom {
+                view: room,
+                progress,
+            }),
+            ..SceneInput::default()
+        })
+    }
+
+    #[test]
+    fn the_switch_starts_exactly_at_the_panner_s_box() {
+        let room = reference_room();
+        let objects = [sounding([0.5, -1.0, 0.5]), sounding([-0.3, 0.6, -0.9])];
+        let boxed = with_input(SceneInput {
+            objects: &objects,
+            has_lfe: true,
+            lfe_count: 1,
+            show_element_numbers: true,
+            ..SceneInput::default()
+        });
+        assert!(same_mesh(&switching(&room, 0.0, &objects), &boxed));
+        // And ends exactly in the room, which has no LFE to draw.
+        let settled = with_input(SceneInput {
+            objects: &objects,
+            show_element_numbers: true,
+            room: Some(InRoom::settled(&room)),
+            ..SceneInput::default()
+        });
+        assert!(same_mesh(&switching(&room, 1.0, &objects), &settled));
+        assert!(!same_mesh(&switching(&room, 0.5, &objects), &settled));
+    }
+
+    #[test]
+    fn on_the_way_an_object_travels_straight_from_the_box_to_where_the_room_puts_it() {
+        let room = reference_room();
+        for head_locked in [false, true] {
+            let object = SceneObject {
+                head_locked,
+                ..sounding([0.5, -1.0, 0.5])
+            };
+            let boxed = object_world_position(object.position);
+            let placed = room.place(object.position, object.head_locked, object.screen_reference);
+            let at = |progress| {
+                object_position(
+                    &object,
+                    object.position,
+                    Some(InRoom {
+                        view: &room,
+                        progress,
+                    }),
+                )
+            };
+            assert_eq!(at(0.0).map(f32::to_bits), boxed.map(f32::to_bits));
+            assert_eq!(at(1.0).map(f32::to_bits), placed.map(f32::to_bits));
+            let halfway = at(0.2);
+            let share = Stages::at(0.2).morph;
+            for axis in 0..3 {
+                let expected = boxed[axis] + (placed[axis] - boxed[axis]) * share;
+                assert!((halfway[axis] - expected).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn the_room_rises_from_its_floor_and_the_lfe_is_gone_before_it_does() {
+        let room = reference_room();
+        let floor = room.floor_y();
+        let (_, top) = room.bounds();
+        let empty = switching(&room, 1.0, &[]);
+        let highest = |mesh: &MeshBuilder| {
+            mesh.solid
+                .iter()
+                .map(|vertex| vertex.position[1])
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        assert!((highest(&empty) - top[1]).abs() < 1e-4);
+        // Halfway up, the walls reach about halfway up.
+        let progress = 0.5;
+        let rise = Stages::at(progress).rise;
+        assert!(rise > 0.2 && rise < 0.8);
+        assert!(Stages::at(progress).seat <= 0.0, "no seat yet");
+        let rising = switching(&room, progress, &[]);
+        // The room comes first, then the listener's boxes.
+        let figure = super::super::figure::PART_COUNT * 36;
+        let walls = rising.solid[..rising.solid.len() - figure]
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((walls - (floor + (top[1] - floor) * rise)).abs() < 1e-4);
+        // The LFE cabinet has shrunk away once the box is in the room: the
+        // only solids left are the room, the seat and the listener.
+        let without_lfe = with_input(SceneInput {
+            room: Some(InRoom {
+                view: &room,
+                progress,
+            }),
+            ..SceneInput::default()
+        });
+        assert_eq!(rising.solid.len(), without_lfe.solid.len());
     }
 
     #[test]

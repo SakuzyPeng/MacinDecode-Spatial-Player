@@ -102,6 +102,8 @@ pub struct PlayerApp {
     room_geometry: room_settings::RoomGeometrySlot,
     /// Draw the room renderer's room when it forms the headphone feed.
     room_view_enabled: bool,
+    /// The switch between the panner's box and the room view, on its own clock.
+    room_switch: scene3d::switch::RoomSwitch,
     /// Screen edits not yet applied; `None` when the page shows the settings.
     room_screen_draft: Option<crate::backend::ScreenSettings>,
     /// The drawn profile, read once per path and design rate.
@@ -945,6 +947,7 @@ impl PlayerApp {
             room_screen_draft: None,
             room_geometry: None,
             room_view_enabled: true,
+            room_switch: scene3d::switch::RoomSwitch::default(),
             hptf_drawing: None,
             hptf_ghost: None,
             hptf_saving: None,
@@ -2736,11 +2739,25 @@ impl PlayerApp {
         decoder: &DecoderSnapshot,
         mirror_frame: Option<&crate::scene_view::SceneViewFrame>,
     ) {
-        let room_view = self.room_view();
-        let rotated = if room_view.is_none() {
+        let now = Instant::now();
+        let pose = self.output.head_snapshot().pose;
+        let target = self.room_view();
+        let room_view = self.room_switch.follow(target, pose, now);
+        if self.room_switch.moving(now) {
+            ui.ctx().request_repaint();
+        }
+        let room = room_view
+            .as_ref()
+            .map(|(view, progress)| scene3d::switch::InRoom {
+                view,
+                progress: *progress,
+            });
+        // The room view turns head-locked objects itself, and so does the
+        // switch on the way into it.
+        let rotated = if room.is_none() {
             mirror_frame
                 .copied()
-                .map(|frame| frame.in_world_space(self.output.head_snapshot().pose))
+                .map(|frame| frame.in_world_space(pose))
         } else {
             None
         };
@@ -2861,7 +2878,7 @@ impl PlayerApp {
                         lfe_count: decoder.metrics().map_or(0, DecodeMetrics::lfe_count),
                         figure: self.figure,
                         skin: self.skins.active.as_ref(),
-                        room: room_view.as_ref(),
+                        room,
                     },
                 );
                 let matrix = self.camera.view_projection(rect.width() / rect.height());
@@ -2872,7 +2889,7 @@ impl PlayerApp {
             }
 
             if self.object_loudness_visible {
-                self.draw_object_nameplates(ui, rect, nameplates, room_view.as_ref());
+                self.draw_object_nameplates(ui, rect, nameplates, room);
             }
             self.draw_camera_presets(ui, rect);
             self.draw_camera_readout(ui, rect, hidden_objects);
@@ -2894,7 +2911,7 @@ impl PlayerApp {
         ui: &egui::Ui,
         stage: egui::Rect,
         objects: &[scene3d::scene::SceneObject<'_>],
-        room: Option<&scene3d::room::RoomView>,
+        room: Option<scene3d::switch::InRoom<'_>>,
     ) {
         let font = egui::FontId::monospace(scene3d::params::NAMEPLATE_TEXT_POINTS);
         let pad = scene3d::params::NAMEPLATE_PAD_POINTS;
@@ -4353,7 +4370,7 @@ fn draw_catalog_files(
 /// slot to label.
 fn nameplate_anchor(
     object: &scene3d::scene::SceneObject<'_>,
-    room: Option<&scene3d::room::RoomView>,
+    room: Option<scene3d::switch::InRoom<'_>>,
 ) -> Option<[f32; 3]> {
     match object.lfe_slot {
         Some(_) if room.is_some() => None,

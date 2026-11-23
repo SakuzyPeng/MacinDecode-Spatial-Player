@@ -335,6 +335,21 @@ instead of the panner's box:
 - **No LFE.** The room renderer gives the LFE no position, so there is no LFE cabinet here and no
   nameplate for it.
 
+**The two views switch over about 1.6 seconds**, whenever the room renderer is chosen or left or
+this switch is turned, so you can follow which object went where:
+
+1. The box shrinks or grows onto what it is in the room (the dashed unit cube), the floor moves to
+   the room's, the listener takes their real size, every object travels from its place in the box to
+   where it sounds in the room, and the LFE cabinet shrinks away;
+2. the walls, their treatment and the edges rise from the floor while the metric ruler fades in, and
+   the box hands over to the dashed cube;
+3. the chair grows under the listener;
+4. the listener sits, with their ears coming to rest on the listening position.
+
+Leaving the room plays the same switch backwards, and changing your mind halfway turns it round from
+where it is. Choosing another room package is a cut, not a switch, and a player that starts in the
+room opens there.
+
 With the switch off, the panner's box is drawn even while the room renderer plays.
 
 ## Playback modes

@@ -1221,7 +1221,7 @@ fn the_object_visual_switches_survive_a_restart() {
 
 #[test]
 fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
-    use crate::scene3d::{room::RoomView, scene::SceneObject};
+    use crate::scene3d::{room::RoomView, scene::SceneObject, switch::InRoom};
 
     let room = crate::room_package::RoomGeometry::parse(include_str!(
         "../../../tests/fixtures/room-reference-7x6x3.2-corrected-v1.json"
@@ -1234,7 +1234,7 @@ fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
         ..SceneObject::default()
     };
     assert_eq!(
-        crate::app::nameplate_anchor(&object, Some(&room)),
+        crate::app::nameplate_anchor(&object, Some(InRoom::settled(&room))),
         Some(room.place(object.position, object.head_locked, object.screen_reference))
     );
     assert_eq!(
@@ -1248,7 +1248,10 @@ fn a_nameplate_follows_its_cube_into_the_room_and_the_lfe_has_none_there() {
         active: true,
         ..SceneObject::default()
     };
-    assert_eq!(crate::app::nameplate_anchor(&lfe, Some(&room)), None);
+    assert_eq!(
+        crate::app::nameplate_anchor(&lfe, Some(InRoom::settled(&room))),
+        None
+    );
     assert!(crate::app::nameplate_anchor(&lfe, None).is_some());
 }
 

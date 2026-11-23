@@ -188,6 +188,18 @@ impl RoomView {
         self
     }
 
+    /// Keep head-locked sources turned with the head at `pose`.
+    pub fn turn_with(&mut self, pose: Quaternion) {
+        self.head_to_world = pose.conjugate();
+    }
+
+    /// A head-locked source's listener-space position turned with the head,
+    /// as the ordinary scene draws it: the same turn [`Self::place`] gives the
+    /// room's, so an object switching views does not swing round on the way.
+    pub fn turned_with_head(&self, position: [f32; 3]) -> [f32; 3] {
+        self.head_to_world.rotate_listener(position)
+    }
+
     /// The listener, seated with the head's centre on the listening position.
     ///
     /// The person is real size: a model unit is 0.05 m, a 1.6 m figure, so the
@@ -407,6 +419,34 @@ impl RoomView {
         lines
     }
 
+    /// The lowest and highest corner of the room, in world coordinates.
+    pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+        world_bounds(self.world([0.0; 3]), self.world(self.bounds.dimensions))
+    }
+
+    /// The lowest and highest corner of the Scene's unit box, whole: where
+    /// the ordinary scene's room lands in this one, before the walls cut it.
+    pub fn unit_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        world_bounds(
+            self.world(self.unit_corner(0)),
+            self.world(self.unit_corner(7)),
+        )
+    }
+
+    /// A corner of the unit box in room coordinates, its bits saying which
+    /// end of each axis it is at.
+    fn unit_corner(&self, index: usize) -> [f64; 3] {
+        std::array::from_fn(|axis| {
+            let sign = if index >> axis & 1 == 1 { 1.0 } else { -1.0 };
+            match self.metres_per_unit {
+                Some(half) => self.bounds.listener[axis] + sign * half,
+                // On the clearance itself, not a rounding either side of it.
+                None if sign > 0.0 => self.bounds.dimensions[axis] - self.bounds.clearance,
+                None => self.bounds.clearance,
+            }
+        })
+    }
+
     /// The edges of the Scene's unit box — the ordinary scene's whole room —
     /// centred on the ears at the current scene unit, each split where it
     /// leaves the volume a source can sound in. That volume is the room less
@@ -417,17 +457,7 @@ impl RoomView {
     /// The minimum distance is not drawn: it only matters at a scene unit
     /// shorter than itself, where the whole box shrinks into the listener.
     pub fn unit_box(&self) -> Vec<BoxSegment> {
-        let corner = |index: usize| -> [f64; 3] {
-            std::array::from_fn(|axis| {
-                let sign = if index >> axis & 1 == 1 { 1.0 } else { -1.0 };
-                match self.metres_per_unit {
-                    Some(half) => self.bounds.listener[axis] + sign * half,
-                    // On the clearance itself, not a rounding either side of it.
-                    None if sign > 0.0 => self.bounds.dimensions[axis] - self.bounds.clearance,
-                    None => self.bounds.clearance,
-                }
-            })
-        };
+        let corner = |index: usize| self.unit_corner(index);
         let low = [self.bounds.clearance; 3];
         let high: [f64; 3] =
             std::array::from_fn(|axis| self.bounds.dimensions[axis] - self.bounds.clearance);
@@ -462,6 +492,15 @@ impl RoomView {
         }
         segments
     }
+}
+
+/// Two opposite corners in world coordinates, as the lowest and the highest.
+/// The turn from room axes reverses two of them, so either may be either.
+fn world_bounds(a: [f32; 3], b: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    (
+        std::array::from_fn(|axis| a[axis].min(b[axis])),
+        std::array::from_fn(|axis| a[axis].max(b[axis])),
+    )
 }
 
 /// The room's inward normal at a surface, in room axes.

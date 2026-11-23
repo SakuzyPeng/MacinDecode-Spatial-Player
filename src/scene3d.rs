@@ -24,3 +24,4 @@ pub mod params;
 pub mod room;
 pub mod scene;
 pub mod skin;
+pub mod switch;

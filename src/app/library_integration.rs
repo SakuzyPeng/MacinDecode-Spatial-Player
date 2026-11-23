@@ -165,6 +165,9 @@ impl PlayerApp {
                     self.fade_silent_objects = self.preferences.fade_silent_objects;
                     self.meter_bank_open = self.preferences.meter_bank;
                     self.room_view_enabled = self.preferences.room_view;
+                    // The restored settings may put the stage in a room: it
+                    // opens there rather than walking in.
+                    self.room_switch = scene3d::switch::RoomSwitch::default();
                     self.meter_readout = self.preferences.meter_readout;
                     self.restore_skin(context);
                     self.preferences_observed = self.preferences.clone();

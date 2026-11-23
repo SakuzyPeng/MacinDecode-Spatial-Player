@@ -83,7 +83,7 @@ impl Part {
 
 /// How the body is held. The head assembly turns about the neck the same way in
 /// both; the pose only decides where the limbs point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Pose {
     #[default]
     Standing,
@@ -93,6 +93,9 @@ pub enum Pose {
     /// points forward that turns it about its own length, by 4.5°, and is left
     /// out.
     Seated,
+    /// Part of the way from standing to seated, while the room view's switch
+    /// sits the listener down: every joint turned by that share of its angle.
+    Sitting(f32),
 }
 
 /// The parts a pose can turn. The skin atlas's parts map onto the same ones.
@@ -137,6 +140,7 @@ impl Pose {
         match self {
             Self::Standing => (pivot, IDENTITY_AXES),
             Self::Seated => (pivot, limb_axes(pitch, splay)),
+            Self::Sitting(amount) => (pivot, limb_axes(pitch * amount, splay * amount)),
         }
     }
 
@@ -209,6 +213,52 @@ impl Stance {
             unit,
             neck: -4.0 * unit,
         }
+    }
+
+    /// Standing on `floor_y` at a model unit of `unit`: the listener on the
+    /// room view's floor, at the room's scale, before they sit down.
+    pub fn standing_at(floor_y: f32, unit: f32) -> Self {
+        Self {
+            pose: Pose::Standing,
+            unit,
+            neck: floor_y + 24.0 * unit,
+        }
+    }
+
+    /// `amount` of the way from `standing` to `seated`, never through
+    /// `floor_y`.
+    ///
+    /// Lowering the body and swinging the legs forward together would push a
+    /// still mostly hanging leg through the floor halfway down, so the body is
+    /// held up by whatever the lowest part would have sunk. The seated pose has
+    /// its feet in the air, so by the end nothing holds it and it arrives
+    /// exactly where [`Self::seated`] puts it.
+    #[must_use]
+    pub fn sitting(standing: Self, seated: Self, amount: f32, floor_y: f32) -> Self {
+        if amount <= 0.0 {
+            return standing;
+        }
+        if amount >= 1.0 {
+            return seated;
+        }
+        let mix = |a: f32, b: f32| (b - a).mul_add(amount, a);
+        let mut stance = Self {
+            pose: Pose::Sitting(amount),
+            unit: mix(standing.unit, seated.unit),
+            neck: mix(standing.neck, seated.neck),
+        };
+        let lowest = Figure::default()
+            .parts_in(stance)
+            .iter()
+            .map(|part| {
+                let reach: f32 = (0..3)
+                    .map(|axis| part.axes[axis][1].abs() * part.size[axis] / 2.0)
+                    .sum();
+                part.centre[1] - reach
+            })
+            .fold(f32::INFINITY, f32::min);
+        stance.neck += (floor_y - lowest).max(0.0);
+        stance
     }
 
     /// A point in model units from the neck, on `limb`, in world space.
@@ -805,6 +855,36 @@ mod tests {
             assert!(close(leg.centre[1] - leg.size[1] / 2.0, floor));
         }
         assert!(seat.iter().all(|part| part.tone == PartTone::Seat));
+    }
+
+    #[test]
+    fn sitting_down_never_goes_through_the_floor_and_lands_on_the_seated_pose() {
+        // Ears 24 units up, the lowest listening position the seat allows.
+        let unit = 0.012;
+        let floor = -24.0 * unit;
+        let standing = Stance::standing_at(floor, unit);
+        let seated = Stance::seated(unit);
+        assert_eq!(Stance::sitting(standing, seated, 0.0, floor), standing);
+        assert_eq!(Stance::sitting(standing, seated, 1.0, floor), seated);
+        let lowest = |stance: Stance| {
+            Figure::default()
+                .parts_in(stance)
+                .iter()
+                .map(|part| {
+                    part.centre[1]
+                        - (0..3)
+                            .map(|axis| part.axes[axis][1].abs() * part.size[axis] / 2.0)
+                            .sum::<f32>()
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
+        for step in 1..100_u8 {
+            let stance = Stance::sitting(standing, seated, f32::from(step) / 100.0, floor);
+            assert!(lowest(stance) >= floor - 1e-5, "step {step}");
+            // A leg turning about the hip digs its heel in at first, which
+            // holds the body up by under a fifth of a unit, and no more.
+            assert!(stance.neck <= standing.neck + 0.2 * unit, "step {step}");
+        }
     }
 
     #[test]

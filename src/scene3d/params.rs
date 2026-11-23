@@ -353,6 +353,12 @@ pub const ROOM_VIEW_FLOOR_TONE: f32 = 0.10;
 pub const ROOM_VIEW_DASH: f32 = 0.035;
 pub const ROOM_VIEW_DASH_GAP: f32 = 0.025;
 
+/// How long the switch between the panner's box and the room view takes, in
+/// seconds, either way. Long enough to follow the box into the room and the
+/// listener onto the seat, short enough not to stand between a choice of
+/// renderer and its picture.
+pub const ROOM_SWITCH_SECONDS: f32 = 1.6;
+
 /// Default orthographic height, framing the room with a little air around it.
 pub const DEFAULT_ORTHO_HEIGHT: f32 = 2.7;
 /// Zoomed all the way in: a single object fills a good part of the viewport.
