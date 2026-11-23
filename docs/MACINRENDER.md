@@ -8,7 +8,7 @@ Player 将 AC-4 Core 的 Scene 或 APAC 离散多声道 转换为 renderer-nativ
 `Audio settings → Speakers → Speaker renderer` 分别选择 SAF VBAP（默认）或 Triple Balance。
 VBAP 沿用 Apple 几何；Triple Balance 发送 C ABI 的 `ADM_RENDERER_TRIPLE_BALANCE = 7`，渲染和设备输出均使用标准房间几何。该选择只影响系统空间音频，软件双耳继续使用 SAF HRTF，Windows 对象直通保持原通路。旧设置缺少 `speaker_renderer` 时保持 VBAP；算法或几何改变会准备新输出并恢复当前播放位置。
 
-当前固定 Core `c754495` / C ABI 1.50（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
+当前固定 Core `c87e18b` / C ABI 1.50（`abi_probe.c` 要求不低于 1.44）。1.45 新增的 Triple Balance **D mode** 只用于 48 kHz 离线渲染，播放器的实时 Scene 流不使用。后台以 null 输出实际提交对象、LFE 和静音补齐床，检查 worker 完成后才启用对应布局，不以创建成功代替可播放。探测不打开音频设备，失败显示结构化 backend diagnostic。
 
 Triple Balance 要求完整的 7.1.2 bed。播放器在原生边界为 LFE 增加九路永久静音的 bed 通道；普通对象照常提交，虚拟声道不占用播放器的源对象和表头。静音通道使用避开源 ID 的独立 ID，随 generation 重建，PCM 标为无信号，状态关闭且增益为零。源解码数据和场景元数据不修改。
 
@@ -125,7 +125,7 @@ Audio settings 的内容按**播放模式**分页，页签由 `OutputPage::of` �
 `needs_rebuild` 按上游会话契约划分：切换渲染器、HRIR、比例或屏幕需要新会话；只换房间不重建，留给
 `adm_scene_stream_switch_room` 在运行中的会话里后台准备并交叉淡化。
 
-固定的 `c754495` / C ABI 1.50 已带房间渲染（1.46 房间、1.47 屏幕、1.48 质量档），播放器还没有接上。
+固定的 `c87e18b` / C ABI 1.50 已带房间渲染（1.46 房间、1.47 屏幕、1.48 质量档），播放器还没有接上。
 `OutputSettings::playback_blocker` 在选中 Room 时总是返回错误（未选房间包时提示先选），
 `validate_source`、`PreparedSession::new` 和 `Runtime::replace_source` 在创建或复用会话前检查它：
 Room 选择既不会新建会话，也不会复用已持有的 SAF 会话、在 Room 名义下播放 SAF HRTF。接入时在
@@ -437,7 +437,9 @@ CMake 工程。`.cargo/config.toml` 的 `[env]` 让岛使用自带源码的编�
 
 上游源码目录取自 `mradm-islands-sys` 交给依赖方的链接清单（`DEP_MRADM_ISLANDS_MANIFEST`）旁边的
 `CMakeCache.txt`，即 Cargo 检出的同一份代码。构建脚本先审计清单：岛与编解码库必须是静态归档，
-Windows 归档里的导入对象只允许 Rust std 自带的两个系统 DLL；系统库与框架按名链接。
+Windows 归档里的导入对象只允许 Rust std 自带的两个系统 DLL；系统库与框架按名链接。Windows 上清单记录的
+MSVC 运行库（`msvc-runtime:`）必须是 `MultiThreaded`：上游按目标的 `crt-static` 选择岛与编解码库的 CRT，
+播放器的 `.cargo/config.toml` 打开了它，安装包因此不带 Visual C++ 运行库。
 
 ### 跨平台逐位一致的前提
 

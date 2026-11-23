@@ -4,27 +4,36 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Every library file the islands' link manifest names, in link order. Its
-/// lines are `kind:value`: `file:` an archive, `link:` a codec target that a
-/// `target:Name=FILE;LINKS` line resolves to its file and link interface, and
-/// `framework:` / `system:` platform libraries the toolchain provides.
-fn libraries(manifest: &str) -> Vec<PathBuf> {
-    let mut result = Vec::new();
+/// What the islands' link manifest says: every library file it names, in link
+/// order, and the MSVC runtime the islands were compiled for. Its lines are
+/// `kind:value`: `file:` an archive, `link:` a codec target that a
+/// `target:Name=FILE;LINKS` line resolves to its file and link interface,
+/// `framework:` / `system:` platform libraries the toolchain provides,
+/// `msvc-runtime:` the CRT and `feature:` an optional library (IAMF).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Manifest {
+    libraries: Vec<PathBuf>,
+    msvc_runtime: Option<String>,
+}
+
+fn parse(manifest: &str) -> Manifest {
+    let mut result = Manifest::default();
     for line in manifest.lines().filter(|line| !line.trim().is_empty()) {
         let (kind, value) = line
             .split_once(':')
             .unwrap_or_else(|| panic!("Not a link manifest line: {line}"));
         match kind {
-            "file" => result.push(PathBuf::from(value)),
+            "file" => result.libraries.push(PathBuf::from(value)),
             "target" => {
                 let (_, spec) = value.split_once('=').expect("target:Name=FILE;LINKS");
-                result.extend(
+                result.libraries.extend(
                     spec.split(';')
                         .filter(|item| Path::new(item).is_absolute())
                         .map(PathBuf::from),
                 );
             }
-            "link" | "framework" | "system" => {}
+            "msvc-runtime" => result.msvc_runtime = Some(value.into()),
+            "link" | "framework" | "system" | "feature" => {}
             _ => panic!("Unexpected native link manifest kind: {kind}"),
         }
     }
@@ -42,8 +51,20 @@ fn is_archive(path: &Path, windows: bool) -> bool {
 pub fn audit(manifest: &Path, windows: bool) {
     let text = fs::read_to_string(manifest)
         .unwrap_or_else(|error| panic!("Cannot read {}: {error}", manifest.display()));
-    let libraries = libraries(&text);
+    let Manifest {
+        libraries,
+        msvc_runtime,
+    } = parse(&text);
     assert!(!libraries.is_empty(), "No native static libraries");
+    // The player links the static CRT (`+crt-static`) so that its installer
+    // carries no Visual C++ runtime; the islands have to agree.
+    if windows {
+        assert_eq!(
+            msvc_runtime.as_deref(),
+            Some("MultiThreaded"),
+            "The native islands must use the static MSVC runtime"
+        );
+    }
     let mut checked = std::collections::HashSet::new();
     for path in libraries {
         assert!(
@@ -199,14 +220,19 @@ mod tests {
             link:FLAC\n\
             target:FLAC=/build/_deps/libFLAC.a;ogg;/build/_deps/libogg.a;-lm\n\
             framework:CoreAudio\n\
-            system:m\n";
+            system:m\n\
+            msvc-runtime:MultiThreaded\n\
+            feature:iamf\n";
         assert_eq!(
-            libraries(manifest),
-            [
-                PathBuf::from("/build/libmr_adm_audio.a"),
-                PathBuf::from("/build/_deps/libFLAC.a"),
-                PathBuf::from("/build/_deps/libogg.a"),
-            ]
+            parse(manifest),
+            Manifest {
+                libraries: vec![
+                    PathBuf::from("/build/libmr_adm_audio.a"),
+                    PathBuf::from("/build/_deps/libFLAC.a"),
+                    PathBuf::from("/build/_deps/libogg.a"),
+                ],
+                msvc_runtime: Some("MultiThreaded".into()),
+            }
         );
     }
 
@@ -222,8 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn windows_islands_must_use_the_static_runtime() {
+        let empty = tempfile::Builder::new().suffix(".a").tempfile().unwrap();
+        fs::write(empty.path(), b"!<arch>\n").unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for runtime in ["msvc-runtime:MultiThreadedDLL\n", ""] {
+            let manifest = format!("file:{}\n{runtime}", empty.path().display());
+            fs::write(file.path(), &manifest).unwrap();
+            // The archive check is Windows-agnostic; the runtime is not.
+            audit(file.path(), false);
+            assert!(std::panic::catch_unwind(|| audit(file.path(), true)).is_err());
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "Unexpected native link manifest kind")]
     fn an_unknown_manifest_kind_is_rejected() {
-        libraries("dylib:/usr/lib/libFLAC.so\n");
+        parse("dylib:/usr/lib/libFLAC.so\n");
     }
 }

@@ -16,12 +16,12 @@ resolver = "3"
 # code would link the crates.io originals. Keep the revision aligned with
 # `mradm-capi` in crates/macinrender/Cargo.toml.
 [patch.crates-io]
-sofar = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
-rubato = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
-rustfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
-realfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
-ebur128 = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
-rayon-core = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+sofar = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
+rubato = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
+rustfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
+realfft = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
+ebur128 = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
+rayon-core = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
 
 [dependencies]
 eframe = { version = "=0.36.1", default-features = false, features = [

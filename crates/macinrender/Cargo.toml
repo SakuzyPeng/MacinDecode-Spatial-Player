@@ -15,9 +15,9 @@ serde_json = "1"
 # the C ABI, and its `mradm-islands-sys` dependency builds the C/C++ islands and
 # codecs through CMake. Linking the rlib keeps one std under ThinLTO. Keep the
 # revision aligned with the workspace `[patch.crates-io]`.
-mradm-capi = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+mradm-capi = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
 # Named directly only for its `links` metadata: the islands' link manifest.
-mradm-islands-sys = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c7544954bca56ee9a4e5f9fd1c2e94f72fa33df4" }
+mradm-islands-sys = { git = "https://github.com/SakuzyPeng/MacinRender-ADM-Core.git", rev = "c87e18b5383607bac778af2d92bbb0585b252741" }
 
 [build-dependencies]
 cc = "1"
